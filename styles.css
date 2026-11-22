@@ -824,3 +824,228 @@
     font-size: var(--font-ui-small);
     overflow-wrap: anywhere;
 }
+
+.smartmd-status-bar-item {
+    cursor: pointer;
+}
+
+.smartmd-external-filter-details {
+    margin-top: 16px;
+    margin-bottom: 16px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    padding: 10px 14px;
+    background-color: var(--background-secondary);
+}
+
+.smartmd-external-filter-summary {
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.smartmd-external-filter-content {
+    margin-top: 12px;
+}
+
+.smartmd-external-preset-row {
+    margin: 6px 0;
+}
+
+.smartmd-external-rules-field {
+    margin-top: 10px;
+}
+
+.smartmd-external-rules-textarea {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.smartmd-external-filter-intro {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+.smartmd-external-rules-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 16px;
+    margin-bottom: 8px;
+}
+
+.smartmd-external-rule-list {
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    padding: 8px;
+    background-color: var(--background-secondary);
+}
+
+.smartmd-external-rule {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+}
+
+.smartmd-external-rule-syntax {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: var(--background-modifier-border);
+    color: var(--text-normal);
+}
+
+.smartmd-external-rule-target {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: var(--background-primary);
+    color: var(--text-muted);
+}
+
+.smartmd-external-rule-pattern {
+    flex: 1;
+    font-family: var(--font-monospace);
+    font-size: 13px;
+}
+
+.smartmd-external-rule-delete {
+    padding: 2px 8px;
+}
+
+.smartmd-external-rule-form {
+    margin-top: 12px;
+}
+
+.smartmd-external-rule-fields {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.smartmd-external-rule-tips {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.smartmd-onedrive-preview-file {
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+
+.smartmd-build-info {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+
+.smartmd-sync-summary {
+    margin: 10px 0;
+    padding: 10px 14px;
+    border-radius: 6px;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    font-size: 13px;
+}
+
+.smartmd-sync-summary-title {
+    font-weight: bold;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+}
+
+.smartmd-sync-summary-counts {
+    display: flex;
+    gap: 16px;
+    color: var(--text-muted);
+}
+
+.smartmd-diagnostic-center {
+    margin: 12px 0;
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid var(--text-error);
+    background-color: rgba(239, 68, 68, 0.05);
+}
+
+.smartmd-diagnostic-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.smartmd-diagnostic-header-title {
+    margin: 0;
+}
+
+.smartmd-diagnostic-card {
+    margin: 8px 0;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background-color: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.smartmd-diagnostic-card-title {
+    display: flex;
+    justify-content: space-between;
+    font-weight: bold;
+}
+
+.smartmd-diagnostic-badge {
+    color: var(--text-error);
+    font-size: 12px;
+}
+
+.smartmd-diagnostic-evidence {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.smartmd-diagnostic-reason {
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.smartmd-diagnostic-action {
+    font-size: 12px;
+    margin-top: 4px;
+    color: var(--text-accent);
+}
+
+.smartmd-diagnostic-instructions {
+    margin-top: 2px;
+}
+
+.smartmd-diagnostic-suggestion {
+    margin-top: 4px;
+    color: var(--text-success);
+}
+
+.smartmd-external-rule:not(:last-child) {
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.smartmd-external-rule-syntax.smartmd-external-rule-exact {
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.setting-item.smartmd-publish-password-hidden {
+    display: none;
+}
+
+.smartmd-sync-count-success {
+    color: var(--text-success);
+}
+
+.smartmd-sync-count-failed {
+    color: var(--text-error);
+}

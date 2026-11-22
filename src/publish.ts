@@ -177,7 +177,7 @@ export class PublishSetupModal extends Modal {
                 dropdown.onChange((value) => {
                     this.access = value as "public" | "password";
                     if (passwordSetting) {
-                        passwordSetting.settingEl.setCssStyles({ display: this.access === "password" ? "flex" : "none" });
+                        passwordSetting.settingEl.toggleClass("smartmd-publish-password-hidden", this.access !== "password");
                     }
                 });
             });
@@ -190,7 +190,7 @@ export class PublishSetupModal extends Modal {
                 text.setPlaceholder("输入访问密码");
                 passwordInput = text.inputEl;
             });
-        passwordSetting.settingEl.setCssStyles({ display: "none" });
+        passwordSetting.setClass("smartmd-publish-password-hidden");
 
         const actions = this.contentEl.createDiv({ cls: "smartmd-modal-actions" });
         const status = this.contentEl.createEl("p", { cls: "smartmd-modal-status" });

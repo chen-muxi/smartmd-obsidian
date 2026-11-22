@@ -244,10 +244,7 @@ export class SyncPreviewModal extends Modal {
                     continue;
                 }
                 const row = files.createEl("li").createEl("details");
-                row.setCssStyles({
-                    overflowWrap: "anywhere",
-                    minWidth: "0",
-                });
+                row.addClass("smartmd-onedrive-preview-file");
                 row.createEl("summary", { text: redactOneDriveText(path) +
                     "；来源：" + item.source + "；" + direction +
                     (item.skipReasons.length ? "；" + item.skipReasons.join("；") : "") });
@@ -264,8 +261,6 @@ export class SyncPreviewModal extends Modal {
                     : "云端目标：预览时不存在，未经最终批准不会创建" });
             }
         }
-        const progress = this.contentEl.createEl("p");
-        progress.setCssStyles({ display: "none" });
         const actions = this.contentEl.createDiv({ cls: "smartmd-actions" });
         actions.createEl("button", { text: "取消" }).onclick = () => this.close();
         const start = actions.createEl("button", { text: this.commitEnabled ? "确认并开始同步" : "尚未开放首次同步", cls: "mod-cta" });

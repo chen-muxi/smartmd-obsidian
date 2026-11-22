@@ -931,11 +931,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         new Setting(container).setClass("smartmd-settings-section-title").setName("OneDrive 多设备同步").setHeading();
         container.createEl("p", { text: `使用插件独立空间同步知识库文件与非敏感插件状态。授权、模型密钥、外部路径和设备历史不会跨设备同步。${this.runtime.store.storageBoundaryText()}` });
         const buildInfo = container.createEl("div", { cls: "smartmd-build-info" });
-        buildInfo.setCssStyles({
-            fontSize: "11px",
-            color: "var(--text-muted)",
-            marginBottom: "10px",
-        });
+        buildInfo.addClass("smartmd-build-info");
         buildInfo.setText(`运行实例：v${SMARTMD_BUILD_VERSION}（指纹：${SMARTMD_BUILD_FINGERPRINT}）`);
         new Setting(container).setClass("smartmd-settings-subheading").setName("微软账号").setHeading();
         this.microsoftAccountSetting(container);
@@ -1573,22 +1569,10 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
         if (summary) {
             const summaryDiv = container.createEl("div", { cls: "smartmd-sync-summary" });
-            summaryDiv.setCssStyles({
-                margin: "10px 0",
-                padding: "10px 14px",
-                borderRadius: "6px",
-                backgroundColor: "var(--background-secondary)",
-                border: "1px solid var(--background-modifier-border)",
-                fontSize: "13px",
-            });
+            summaryDiv.addClass("smartmd-sync-summary");
 
             const summaryTitle = summaryDiv.createEl("div");
-            summaryTitle.setCssStyles({
-                fontWeight: "bold",
-                marginBottom: "6px",
-                display: "flex",
-                justifyContent: "space-between",
-            });
+            summaryTitle.addClass("smartmd-sync-summary-title");
 
             const statusBadge = settings.status === "ready"
                 ? "🟢 全部同步成功"
@@ -1604,45 +1588,28 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             }
 
             const statsRow = summaryDiv.createEl("div");
-            statsRow.setCssStyles({
-                display: "flex",
-                gap: "16px",
-                color: "var(--text-muted)",
-            });
+            statsRow.addClass("smartmd-sync-summary-counts");
             const counts: Array<[string, number, string?]> = [
                 ["总计", summary.total],
-                ["成功", summary.success, "var(--text-success)"],
-                ["失败", summary.failed, summary.failed > 0 ? "var(--text-error)" : undefined],
+                ["成功", summary.success, "smartmd-sync-count-success"],
+                ["失败", summary.failed, summary.failed > 0 ? "smartmd-sync-count-failed" : undefined],
                 ["未变更", summary.unchanged],
             ];
-            for (const [label, count, color] of counts) {
-                const item = statsRow.createSpan({ text: label + ": " });
-                if (color) item.setCssStyles({ color });
+            for (const [label, count, cls] of counts) {
+                const item = statsRow.createSpan({ text: label + ": ", cls });
                 item.createEl("b", { text: String(count) });
             }
         }
 
         if (diagnostics.length > 0) {
             const diagSection = container.createEl("div", { cls: "smartmd-diagnostic-center" });
-            diagSection.setCssStyles({
-                margin: "12px 0",
-                padding: "12px",
-                borderRadius: "8px",
-                border: "1px solid var(--text-error)",
-                backgroundColor: "rgba(239, 68, 68, 0.05)",
-            });
 
             const diagHeader = diagSection.createEl("div");
-            diagHeader.setCssStyles({
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: "10px",
-            });
+            diagHeader.addClass("smartmd-diagnostic-header");
 
             const headerLeft = diagHeader.createEl("div");
             new Setting(headerLeft).setClass("smartmd-diag-title").setName(`⚠️ 失败文件智能诊断中心 (${diagnostics.length} 项需要调整)`).setHeading();
-            headerLeft.setCssStyles({ margin: "0" });
+            headerLeft.addClass("smartmd-diagnostic-header-title");
 
             const retryBtn = diagHeader.createEl("button", { text: "仅重试失败项", cls: "mod-cta" });
             retryBtn.onclick = async () => {
@@ -1657,35 +1624,18 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
             for (const diag of diagnostics) {
                 const card = diagSection.createEl("div", { cls: "smartmd-diag-card" });
-                card.setCssStyles({
-                    margin: "8px 0",
-                    padding: "10px 12px",
-                    borderRadius: "6px",
-                    backgroundColor: "var(--background-primary)",
-                    border: "1px solid var(--background-modifier-border)",
-                });
+                card.addClass("smartmd-diagnostic-card");
 
                 // 标题行
                 const cardTitle = card.createEl("div");
-                cardTitle.setCssStyles({
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontWeight: "bold",
-                });
+                cardTitle.addClass("smartmd-diagnostic-card-title");
                 cardTitle.createSpan({ text: `📄 ${diag.relativePath}` });
                 const badge = cardTitle.createSpan({ text: `[${diag.remediation?.badgeText || "失败"}]` });
-                badge.setCssStyles({
-                    color: "var(--text-error)",
-                    fontSize: "12px",
-                });
+                badge.addClass("smartmd-diagnostic-badge");
 
                 // 凭什么失败（技术证据）
                 const evDiv = card.createEl("div");
-                evDiv.setCssStyles({
-                    fontSize: "12px",
-                    color: "var(--text-muted)",
-                    marginTop: "4px",
-                });
+                evDiv.addClass("smartmd-diagnostic-evidence");
                 const ev = diag.evidence || {} as any;
                 evDiv.createEl("b", { text: "【凭什么失败】 " });
                 evDiv.createSpan({ text: `HTTP ${ev.httpStatus || 0} (${ev.gatewayErrorCode || "未知代码"})` });
@@ -1696,33 +1646,23 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
                 // 为什么这几个会失败（通俗说明）
                 const reasonDiv = card.createEl("div");
-                reasonDiv.setCssStyles({
-                    fontSize: "12px",
-                    marginTop: "4px",
-                });
+                reasonDiv.addClass("smartmd-diagnostic-reason");
                 reasonDiv.createEl("b", { text: "【为什么失败】 " });
                 reasonDiv.createSpan({ text: `${diag.humanReason}：${diag.humanExplanation}` });
 
                 // 要怎么调整才能不失败（行动指南）
                 const remDiv = card.createEl("div");
-                remDiv.setCssStyles({
-                    fontSize: "12px",
-                    marginTop: "4px",
-                    color: "var(--text-accent)",
-                });
+                remDiv.addClass("smartmd-diagnostic-action");
                 remDiv.createEl("b", { text: "【怎么调整】 " });
                 remDiv.createEl("span", { text: diag.remediation?.actionTitle || "操作指引" });
                 const instructList = remDiv.createEl("div");
-                instructList.setCssStyles({ marginTop: "2px" });
+                instructList.addClass("smartmd-diagnostic-instructions");
                 for (const line of (diag.remediation?.stepInstructions || [])) {
                     instructList.createEl("div", { text: line });
                 }
                 if (diag.remediation?.suggestedNewPath) {
                     const suggestP = remDiv.createEl("div");
-                    suggestP.setCssStyles({
-                        marginTop: "4px",
-                        color: "var(--text-success)",
-                    });
+                    suggestP.addClass("smartmd-diagnostic-suggestion");
                     suggestP.createSpan({ text: "建议更名为：" });
                     suggestP.createEl("code", { text: diag.remediation.suggestedNewPath });
                 }

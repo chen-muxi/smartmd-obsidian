@@ -10,7 +10,7 @@ export default class SmartMDPlugin extends Plugin {
         try {
             this.statusBarItem = this.addStatusBarItem();
             this.statusBarItem.setText("SmartMD: 就绪");
-            this.statusBarItem.setCssStyles({ cursor: "pointer" });
+            this.statusBarItem.addClass("smartmd-status-bar-item");
             this.statusBarItem.title = "点击打开 SmartMD 设置";
             this.statusBarItem.onclick = () => {
                 this.runtime?.openSettingsTab("onedrive");
