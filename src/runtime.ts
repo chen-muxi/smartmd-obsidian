@@ -1977,30 +1977,35 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 });
                 addExample(text.inputEl, "smartmd-ai-model-example", "示例：gpt-4o");
             });
-        new Setting(container).setClass("smartmd-ai-model-setting")
+        const keySetting = new Setting(container).setClass("smartmd-ai-model-setting")
             .setName("模型密钥")
-            .setDesc("直接覆盖即可更换，删空即可移除。HTTP 服务无需认证时可留空。")
-            .addText((text) => {
-                keyInput = text.inputEl;
-                keyInput.type = "password";
-                keyInput.autocomplete = "off";
-                text.setPlaceholder("未填写密钥").setValue(this.runtime.store.getAIKey(shared.aiApiUrl)).onChange((value) => {
-                    const address = this.runtime.store.settings.shared.aiApiUrl;
-                    if (this.aiAddressShown !== address) {
-                        this.scheduleDisplay();
-                        return;
+            .setDesc("直接覆盖即可更换，删空即可移除。HTTP 服务无需认证时可留空。");
+        const keyError = keySetting.descEl.createDiv({
+            cls: "smartmd-ai-key-error",
+            attr: { role: "alert" },
+        });
+        keySetting.addText((text) => {
+            keyInput = text.inputEl;
+            keyInput.type = "password";
+            keyInput.autocomplete = "off";
+            text.setPlaceholder("未填写密钥").setValue(this.runtime.store.getAIKey(shared.aiApiUrl)).onChange((value) => {
+                const address = this.runtime.store.settings.shared.aiApiUrl;
+                if (this.aiAddressShown !== address) {
+                    this.scheduleDisplay();
+                    return;
+                }
+                this.aiSettingsChanged();
+                keyError.setText("");
+                this.aiKeySave = this.aiKeySave.then(() => this.runtime.store.setAIKey(value.trim(), address)).then(() => ({ address, saved: true }), () => {
+                    if (keyInput?.value === value && this.runtime.store.settings.shared.aiApiUrl === address) {
+                        keyInput.value = this.runtime.store.getAIKey(address);
+                        keyError.setText("模型密钥未能保存至设备安全存储");
                     }
-                    this.aiSettingsChanged();
-                    this.aiKeySave = this.aiKeySave.then(() => this.runtime.store.setAIKey(value.trim(), address)).then(() => ({ address, saved: true }), () => {
-                        if (keyInput?.value === value && this.runtime.store.settings.shared.aiApiUrl === address) {
-                            keyInput.value = this.runtime.store.getAIKey(address);
-                        }
-                        new Notice("模型密钥未能保存至设备安全存储");
-                        return { address, saved: false };
-                    });
+                    return { address, saved: false };
                 });
-                addExample(text.inputEl, "smartmd-ai-key-example", "示例：sk-…（服务要求认证时填写）");
             });
+            addExample(text.inputEl, "smartmd-ai-key-example", "示例：sk-…（服务要求认证时填写）");
+        });
         const connection = new Setting(container)
             .setName("模型连接")
             .setDesc("用内置示例测试选区改写和后续润色。两次请求均只使用示例文字。");
