@@ -4,10 +4,11 @@ import { readFileSync } from "node:fs";
 
 const prod = (process.argv[2] === 'production');
 const markedLicense = readFileSync(new URL("./licenses/marked.txt", import.meta.url), "utf8");
+const { version } = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
 
 esbuild.build({
     banner: {
-        js: `/* SmartMD 1.0.22 */\n/*! Marked license\n${markedLicense}\n*/`,
+        js: `/* SmartMD ${version} */\n/*! Marked license\n${markedLicense}\n*/`,
     },
     entryPoints: ['main.ts'],
     bundle: true,

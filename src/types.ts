@@ -166,6 +166,7 @@ export interface OneDriveSyncSettings {
     lastSkippedCount: number;
     sharedStateHash: string;
     fileStates: Record<string, SyncFileState>;
+    androidFirstDownload?: AndroidFirstDownload;
     runAllowed: boolean;
     confirmed: boolean;
     /** Locally persisted account/cloud Vault binding; identity is not execution consent. */
@@ -255,6 +256,19 @@ export interface OneDriveSyncSettings {
         stage: "TRANSFERRING" | "RECONCILE_REQUIRED" | "FILES_COPIED";
         updatedAt: number;
     };
+}
+
+export interface AndroidFirstDownload {
+    path: string;
+    stagingPath: string;
+    accountId: string;
+    vaultId: string;
+    deviceId: string;
+    proofId: string;
+    remoteId: string;
+    remoteEtag: string;
+    size: number;
+    sha256: string;
 }
 
 export interface ExternalFileSnapshot {

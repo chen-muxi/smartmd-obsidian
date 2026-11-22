@@ -1,5 +1,6 @@
 import { App, Notice, Platform, Plugin, requestUrl } from "obsidian";
 import { MicrosoftDeviceCodeSession, MicrosoftDeviceToken } from "./microsoft-device-flow";
+import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
 
 const MICROSOFT_CLIENT_ID = "0ad3b293-4c9e-4d7a-94a3-7043c8bb6248";
 const MICROSOFT_REDIRECT_URI = "obsidian://smartkeep-connect-onedrive";
@@ -11,11 +12,11 @@ const AI_SECRET = "obsidian-suite-ai-key";
 const AI_HTTP_SECRET = "obsidian-suite-ai-http-key";
 
 export function getDevicePlatformName(): string {
+    if (Platform.isIosApp) return "iOS";
+    if (Platform.isAndroidApp) return "Android";
     if (Platform.isWin) return "Windows";
     if (Platform.isMacOS) return "macOS";
     if (Platform.isLinux) return "Linux";
-    if (Platform.isIosApp) return "iOS";
-    if (Platform.isAndroidApp) return "Android";
     return "Obsidian device";
 }
 
@@ -51,17 +52,20 @@ export class SmartMDStore {
     private approvedVaultRoot = "";
     private scopedInstallationKey = "";
     private loadedInThisProcess = false;
+    private preserveInactiveOneDrive = false;
     private persistenceQueue: Promise<void> = Promise.resolve();
 
     constructor(private app: App, private plugin: Plugin) {}
 
     private currentPhysicalVaultRoot(): string {
-        const adapter: any = this.app.vault.adapter;
-        const raw = typeof adapter?.getBasePath === "function"
-            ? adapter.getBasePath()
-            : typeof adapter?.basePath === "string"
-                ? adapter.basePath
-                : typeof adapter?.fullPath === "string" ? adapter.fullPath : "";
+        const adapter = this.app.vault.adapter;
+        if (Platform?.isAndroidApp) return getAndroidAppStorageRoot(adapter);
+        const desktop = adapter as Partial<{ getBasePath(): string; basePath: string; fullPath: string }>;
+        const raw = typeof desktop?.getBasePath === "function"
+            ? desktop.getBasePath()
+            : typeof desktop?.basePath === "string"
+                ? desktop.basePath
+                : typeof desktop?.fullPath === "string" ? desktop.fullPath : "";
         const normalized = raw.replace(/\\/g, "/").replace(/\/+$/g, "");
         // Never fall back to the user-controlled Vault name. The physical
         // location is part of the authorization scope on Windows.
@@ -98,6 +102,16 @@ export class SmartMDStore {
             } catch {}
         }
         this.settings = mergeSettings(raw.suiteV2);
+        this.preserveInactiveOneDrive = !Platform.isDesktopApp && !this.currentPhysicalVaultRoot();
+        if (this.preserveInactiveOneDrive) {
+            this.approvedVaultRoot = "";
+            this.scopedInstallationKey = "";
+            this.settings.local.oneDrive.runAllowed = false;
+            this.settings.local.oneDrive.confirmed = false;
+            this.settings.local.oneDrive.enabled = false;
+            this.loadedInThisProcess = true;
+            return;
+        }
         if (!this.settings.local.oneDrive.vaultId) {
             this.settings.local.oneDrive.vaultId = newId("vault");
         }
@@ -222,6 +236,11 @@ export class SmartMDStore {
             // Freeze the same JSON representation the plugin persists, so an
             // in-flight writer never observes later in-memory phase changes.
             const payload = JSON.parse(JSON.stringify({ ...raw, suiteV2: this.settings }));
+            if (this.preserveInactiveOneDrive) {
+                const previous = raw.suiteV2?.local?.oneDrive;
+                if (previous === undefined) delete payload.suiteV2.local.oneDrive;
+                else payload.suiteV2.local.oneDrive = previous;
+            }
             await this.plugin.saveData(payload);
             for (const listener of this.listeners) listener();
         });

@@ -1,12 +1,13 @@
 # SmartMD
 
-SmartMD is a desktop Obsidian plugin for publishing Markdown, syncing notes on Windows, and reviewing AI edits before applying them. The plugin interface is in Simplified Chinese. This release requires Obsidian 1.15.1 or later.
+SmartMD is an Obsidian plugin for publishing Markdown, syncing notes, and reviewing AI edits before applying them. The plugin interface is in Simplified Chinese. This release requires Obsidian 1.15.1 or later.
 
 ## Getting started
 
 - **AI editing.** In SmartMD settings, configure an OpenAI-compatible endpoint and model. Right-click a note or selection to open AI editing. You can review the suggested changes before applying them and undo an applied edit.
 - **SmartKeep publishing.** Sign in from SmartMD, then select the note or folder to publish. Choose public or password-protected access. If you enable continued publishing, changes within the published scope can be sent to SmartKeep.
-- **Windows sync.** Configure an external folder or sign in to a Microsoft account for OneDrive sync. Review the proposed scope before starting and check the plugin's prompts for conflicts and deletions. Windows folder and OneDrive sync are the supported sync workflows for this release.
+- **OneDrive sync (Windows and Android).** Sign in to a Microsoft account on each device. On Android, use an Obsidian vault created with **App storage**. To receive an existing cloud vault, start with a new, empty local vault and approve the download preview. Review both versions after a conflict, and approve each deletion separately. Android sync supports UTF-8 Markdown updates. Incoming changes to existing binary attachments stop for review and preserve the original. Windows also provides the advanced first-connection options.
+- **External folder sync (Windows).** Choose a folder and review the proposed scope before allowing synchronization.
 
 ## Accounts, network access, and files
 

@@ -22,12 +22,11 @@ import { MicrosoftDeviceCodeModal } from "./microsoft-device-modal";
 import { ExternalSyncService } from "./external-sync";
 import { OneDriveSyncService } from "./onedrive";
 import { safeOneDriveError } from "./onedrive-error-redaction";
+import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
 import { PublishService } from "./publish";
 import { SmartKeepAuth } from "./smartkeep-auth";
 import { SyncFailureDiagnostic, SMARTKEEP_PUBLISH_URL } from "./types";
 
-export const SMARTMD_BUILD_VERSION = "1.0.22";
-export const SMARTMD_BUILD_FINGERPRINT = "community-1.0.22";
 
 export class SmartMDRuntime {
     private readonly aiPreview = new AIChatPreview();
@@ -49,7 +48,14 @@ export class SmartMDRuntime {
     private feedbackObserver: MutationObserver | null = null;
     private feedbackDotTimer: number | null = null;
 
-    get supportsWindowsSync(): boolean {
+    get supportsOneDrive(): boolean {
+        if (Platform.isAndroidApp) {
+            return Boolean(getAndroidAppStorageRoot(this.app.vault.adapter));
+        }
+        return Platform.isDesktopApp && Platform.isWin;
+    }
+
+    get supportsExternalFolderSync(): boolean {
         return Platform.isDesktopApp && Platform.isWin;
     }
 
@@ -148,7 +154,7 @@ export class SmartMDRuntime {
         const Store: any = SmartMDStore;
         this.store = Store.length >= 2 ? new Store(this.app, this.plugin) : new Store(this.plugin);
         await (this.store as any).load();
-        if (this.supportsWindowsSync) await this.prepareDeviceIdentity();
+        if (this.supportsOneDrive) await this.prepareDeviceIdentity();
         const Auth: any = MicrosoftAuth;
         this.auth = new Auth(this.store);
         // Keep the existing Microsoft Entra redirect; also register the new SmartMD alias.
@@ -158,8 +164,8 @@ export class SmartMDRuntime {
                 this.openSettingsTab("onedrive");
             });
         };
-        if (this.supportsWindowsSync) this.plugin.registerObsidianProtocolHandler("smartkeep-connect-onedrive", onOneDriveAuth);
-        if (this.supportsWindowsSync) this.plugin.registerObsidianProtocolHandler("smartmd-onedrive", onOneDriveAuth);
+        if (this.supportsOneDrive) this.plugin.registerObsidianProtocolHandler("smartkeep-connect-onedrive", onOneDriveAuth);
+        if (this.supportsOneDrive) this.plugin.registerObsidianProtocolHandler("smartmd-onedrive", onOneDriveAuth);
         this.smartkeepAuth = new SmartKeepAuth(this.store);
         // SmartKeep's identity provider has not yet allowlisted the SmartMD callback.
         const onPublishingAuth = (params: Record<string, string>) => {
@@ -176,10 +182,13 @@ export class SmartMDRuntime {
         );
         this.oneDrive = new OneDriveSyncService(this.app, this.store, this.auth);
         this.oneDrive.setStatusCallback((text: string) => this.updateStatusBar(text));
-        if (this.supportsWindowsSync) {
-            this.external = new ExternalSyncService(this.app, this.store);
-            this.oneDrive.setDeleteGuard((path, readOnly) =>
-                this.external!.protectRemoteDelete(path, readOnly));
+        if (this.supportsExternalFolderSync) {
+            const external = new ExternalSyncService(this.app, this.store);
+            this.external = external;
+            if (this.supportsOneDrive) {
+                this.oneDrive.setDeleteGuard((path, readOnly) =>
+                    external.protectRemoteDelete(path, readOnly));
+            }
         }
 
         await this.applySafeMigration();
@@ -243,12 +252,14 @@ export class SmartMDRuntime {
             name: "打开云端发布管理",
             callback: () => this.publish.openManager(),
         });
-        if (this.supportsWindowsSync) {
+        if (this.supportsOneDrive) {
             this.plugin.addCommand({
                 id: "suite-onedrive-sync-now",
                 name: "立即同步到 OneDrive",
                 callback: () => void this.oneDrive.manualSync(),
             });
+        }
+        if (this.supportsExternalFolderSync) {
             this.plugin.addCommand({
                 id: "suite-open-external-sync",
                 name: "管理外部文件夹同步",
@@ -256,7 +267,7 @@ export class SmartMDRuntime {
             });
         }
         this.plugin.addRibbonIcon("cloud", "SmartMD 发布管理", () => this.publish.openManager());
-        if (this.supportsWindowsSync) {
+        if (this.supportsOneDrive) {
             this.plugin.addRibbonIcon("refresh-cw", "SmartMD OneDrive 同步", () => void this.oneDrive.manualSync());
         }
         this.plugin.addRibbonIcon("wand-sparkles", "SmartMD AI 编辑器", () => void this.openAI());
@@ -392,27 +403,27 @@ export class SmartMDRuntime {
     private registerVaultFlows(): void {
         this.plugin.registerEvent(this.app.vault.on("modify", (file) => {
             this.publish.onVaultChange(file);
-            if (this.supportsWindowsSync) this.oneDrive.scheduleAfterSave();
+            if (this.supportsOneDrive) this.oneDrive.scheduleAfterSave();
         }));
         this.plugin.registerEvent(this.app.vault.on("create", (file) => {
             this.publish.onVaultChange(file);
-            if (this.supportsWindowsSync) this.oneDrive.scheduleAfterSave();
+            if (this.supportsOneDrive) this.oneDrive.scheduleAfterSave();
         }));
         this.plugin.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
             this.publish.onVaultRename(file, oldPath);
-            if (this.supportsWindowsSync) this.oneDrive.scheduleAfterSave();
+            if (this.supportsOneDrive) this.oneDrive.scheduleAfterSave();
         }));
         this.plugin.registerEvent(this.app.vault.on("delete", (file) => {
             this.publish.onVaultDelete(file);
-            if (this.supportsWindowsSync) this.oneDrive.scheduleAfterSave();
+            if (this.supportsOneDrive) this.oneDrive.scheduleAfterSave();
         }));
     }
 
     private registerSchedulers(): void {
-        if (!this.supportsWindowsSync) return;
         if (this.external) {
             this.plugin.registerInterval(window.setInterval(() => void this.external?.syncAll(), 3000));
         }
+        if (!this.supportsOneDrive) return;
         this.plugin.registerInterval(window.setInterval(() => {
             const settings = this.oneDrive.settings();
             const intervalMinutes = Number(settings.intervalMinutes);
@@ -429,7 +440,7 @@ export class SmartMDRuntime {
     }
 
     private async applySafeMigration(): Promise<void> {
-        if (this.supportsWindowsSync) await this.oneDrive.isolateUnconfirmed();
+        if (this.supportsOneDrive) await this.oneDrive.isolateUnconfirmed();
         await this.publish.pauseLegacySpaces();
         if (this.external) await this.external.markLegacyBindingsPaused();
         await (this.store as any).save();
@@ -628,8 +639,8 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const content = containerEl.createDiv({ cls: "smartmd-settings-content" });
         if (this.activePage === "home") this.homeSection(content);
         else if (this.activePage === "publish") this.publishSection(content);
-        else if (this.activePage === "onedrive" && this.runtime.supportsWindowsSync) this.oneDriveSection(content);
-        else if (this.activePage === "external" && this.runtime.supportsWindowsSync) this.externalSection(content);
+        else if (this.activePage === "onedrive" && this.runtime.supportsOneDrive) this.oneDriveSection(content);
+        else if (this.activePage === "external" && this.runtime.supportsExternalFolderSync) this.externalSection(content);
         else if (this.activePage === "ai") this.aiSection(content);
         else if (this.activePage === "about") this.aboutSection(content);
         else {
@@ -706,8 +717,11 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             { id: "home", label: "首页" },
             { id: "publish", label: "云端发布" },
         ];
-        if (this.runtime.supportsWindowsSync) {
-            tabs.push({ id: "onedrive", label: "OneDrive" }, { id: "external", label: "外部文件夹" });
+        if (this.runtime.supportsOneDrive) {
+            tabs.push({ id: "onedrive", label: "OneDrive" });
+        }
+        if (this.runtime.supportsExternalFolderSync) {
+            tabs.push({ id: "external", label: "外部文件夹" });
         }
         tabs.push({ id: "ai", label: "AI 编辑" });
         tabs.push({ id: "about", label: "关于" });
@@ -750,14 +764,16 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 status: shared.aiApiUrl && shared.aiModel ? "模型信息已配置" : "等待配置模型",
             },
         ];
-        if (this.runtime.supportsWindowsSync) {
-            cards.splice(1, 0, {
+        if (this.runtime.supportsOneDrive) {
+            cards.splice(cards.length - 1, 0, {
                 page: "onedrive",
                 title: "OneDrive 多设备同步",
                 description: "在插件独立空间同步知识库文件和非敏感插件状态。",
                 status: this.runtime.oneDrive.statusText(),
             });
-            cards.splice(2, 0, {
+        }
+        if (this.runtime.supportsExternalFolderSync) {
+            cards.splice(cards.length - 1, 0, {
                 page: "external",
                 title: "外部文件夹同步",
                 description: "扫描外部文件夹及子目录中的全部 Markdown，保留原目录结构并在知识库内建立副本；任一端修改都会实时同步。",
@@ -930,7 +946,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         container.createEl("p", { text: `使用插件独立空间同步知识库文件与非敏感插件状态。授权、模型密钥、外部路径和设备历史不会跨设备同步。${this.runtime.store.storageBoundaryText()}` });
         const buildInfo = container.createEl("div", { cls: "smartmd-build-info" });
         buildInfo.addClass("smartmd-build-info");
-        buildInfo.setText(`运行实例：v${SMARTMD_BUILD_VERSION}（指纹：${SMARTMD_BUILD_FINGERPRINT}）`);
+        buildInfo.setText(`运行实例：v${this.runtime.plugin.manifest.version}`);
         new Setting(container).setClass("smartmd-settings-subheading").setName("微软账号").setHeading();
         this.microsoftAccountSetting(container);
         if (!this.runtime.isMicrosoftSignedIn() && !this.runtime.isMicrosoftSignInPending()) {
@@ -947,7 +963,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                     .setCta()
                     .onClick(async () => {
                         if (this.runtime.oneDrive.isBusy()) return;
-                        new Notice(`[SmartMD v${SMARTMD_BUILD_VERSION}] 正在检查并启动同步…`, 3000);
+                        new Notice(`[SmartMD v${this.runtime.plugin.manifest.version}] 正在检查并启动同步…`, 3000);
                         button.setDisabled(true).setButtonText("正在检查…");
                         try {
                             await this.runtime.oneDrive.manualSync();
@@ -1396,7 +1412,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                             modal.contentEl.createEl("p", { text: "原稿 SHA-256：" + preview.originalHash });
                             modal.contentEl.createEl("p", { text: "已保留版本 SHA-256：" + preview.preservedHash });
                             modal.contentEl.createEl("p", { text:
-                                "这只确认两份原文及其副本已经分别读回，无任何云端写入、覆盖或删除。再次核对仍一致才解除本条未决锁；需手动重新同步才可能显示全部完成。" });
+                                preview.needsLocalUpdate
+                                    ? "安卓上次未完成最后一步。确认后将把已核验的云端版本写入本机原路径，并保留本机和云端的冲突副本。"
+                                    : "确认两份原文及其副本已经分别读回。再次核对仍一致才解除本条未决锁。" });
                             const actions = modal.contentEl.createDiv({ cls: "smartmd-actions" });
                             actions.createEl("button", { text: "取消，继续保留未决" }).onclick = () => modal.close();
                             const approve = actions.createEl("button", { text: "明确确认保留两份并解除此项锁", cls: "mod-cta" });
@@ -1427,6 +1445,14 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             }
         }
 
+        const retained = this.runtime.oneDrive.listAndroidRetainedDeletionPaths();
+        if (retained.length) {
+            const area = container.createDiv({ cls: "smartmd-onedrive-delete-review" });
+            new Setting(area).setClass("smartmd-settings-subheading").setName("云端缺失，本机笔记已保留").setHeading();
+            area.createEl("p", { text: "下面的安卓笔记有未同步的编辑，或缺少可核验的同步版本。请比较两个版本并保留需要的内容。" });
+            const paths = area.createEl("ul");
+            for (const path of retained) paths.createEl("li", { text: path });
+        }
         const pending = this.runtime.oneDrive.listPendingOneDriveDeletions();
         if (pending.length) {
             const area = container.createDiv({ cls: "smartmd-onedrive-delete-review" });
@@ -1444,6 +1470,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 row.createEl("strong", { text: item.path });
                 row.createEl("p", { text: item.direction === "cloud"
                     ? "授权后会将云端这份移入 OneDrive 回收站"
+                    : Platform.isAndroidApp ? "授权后会从知识库移除本地笔记，并保留回收副本"
                     : "授权后会将此本地笔记移入 Windows 系统回收站" });
                 row.createEl("p", { text: "版本：" + item.version.slice(0, 28) });
             }
@@ -1478,6 +1505,14 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 if (item.cleanupError) {
                     row.createEl("p", { cls: "smartmd-warning", text:
                         "清理失败，恢复档案仍保留：" + safeOneDriveError(item.cleanupError) });
+                }
+                if (Platform.isAndroidApp && item.sourceTrashPath) {
+                    row.createEl("button", { text: "另存安卓回收原件" }).onclick = async () => {
+                        try {
+                            const path = await this.runtime.oneDrive.exportAndroidTrashedOriginal(item.id);
+                            new Notice("安卓回收原件已另存至：" + path);
+                        } catch (error: any) { new Notice(safeOneDriveError(error), 8000); }
+                    };
                 }
                 if (!item.exportedAt) {
                     row.createEl("button", { text: "另存恢复副本，不覆盖原稿" }).onclick = async () => {

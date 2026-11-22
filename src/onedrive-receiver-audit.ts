@@ -1,4 +1,6 @@
 import { App } from "obsidian";
+import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
+import type { AndroidFirstDownload } from "./types";
 
 /** Inventory only. ELIGIBLE is a preview prerequisite, NEVER execution consent. */
 export type ReceiverCandidateAudit = Readonly<{
@@ -20,10 +22,13 @@ export type ReceiverCurrentInstallation = Readonly<{
 export type ReceiverIncompleteHistory = Readonly<{
     cloudVaultId: string;
     trackedPaths: readonly string[];
+    android?: { intent: AndroidFirstDownload | null };
 }>;
 
+type ReceiverPathDialect = "win32" | "posix";
+
 type FsReadOnly = {
-    lstat(path: string): Promise<{ isDirectory(): boolean; isSymbolicLink(): boolean; birthtimeMs?: number }>;
+    lstat(path: string): Promise<{ isDirectory(): boolean; isFile?(): boolean; isSymbolicLink(): boolean; birthtimeMs?: number }>;
     realpath(path: string): Promise<string>;
     readdir(path: string): Promise<Array<string | { name: string }>>;
     readFile?(path: string, encoding: "utf8"): Promise<string>;
@@ -62,7 +67,7 @@ function freshLocalSmartMDState(json: string, scope: ReceiverCurrentInstallation
         if (sync.confirmed || sync.runAllowed || sync.enabled || sync.firstSyncCompleted ||
             Number(sync.lastSuccessAt || 0) !== 0 || sync.confirmationVaultId ||
             sync.confirmationAccountId || sync.cloudVaultId || sync.localVaultId ||
-            sync.firstCommitJournal || sync.firstFileJournal || sync.lastSyncSummary ||
+            sync.firstCommitJournal || sync.firstFileJournal || sync.androidFirstDownload || sync.lastSyncSummary ||
             sync.sharedStateHash || sync.sharedSettingsApproved ||
             sync.sharedApprovalVault || sync.pendingSharedImport ||
             sync.remoteDeltaCache || sync.deltaLink) return false;
@@ -99,10 +104,11 @@ function incompleteLocalSmartMDState(
             !empty(local.externalRecoveryArchives) || !empty(local.externalConflicts) ||
             !empty(sync.pendingUploadOperations) || !empty(sync.pendingConflicts) ||
             !empty(sync.pendingDeletions) || sync.firstCommitJournal ||
-            sync.firstFileJournal) return false;
+            sync.firstFileJournal ||
+            JSON.stringify(sync.androidFirstDownload || null) !== JSON.stringify(history.android?.intent || null)) return false;
         const existing = Object.keys(sync.fileStates || {}).sort();
         const allowed = [...history.trackedPaths].sort();
-        return allowed.length > 0 && JSON.stringify(existing) === JSON.stringify(allowed) &&
+        return (allowed.length > 0 || Boolean(history.android)) && JSON.stringify(existing) === JSON.stringify(allowed) &&
             existing.every((key) => {
                 const item = sync.fileStates[key];
                 return !!item && !!item.remoteId && !!item.remoteEtag &&
@@ -118,6 +124,7 @@ export async function inspectReceiverCandidateInventory(
     app: App, sourcePhysicalRoot: string | null, readOnlyFs?: FsReadOnly,
     currentInstallation?: ReceiverCurrentInstallation,
     incomplete?: ReceiverIncompleteHistory,
+    pathDialect: ReceiverPathDialect = "win32",
 ): Promise<ReceiverCandidateAudit> {
     let inspectedEntries = 0;
     let rootBirthtimeMs: number | null = null;
@@ -137,16 +144,31 @@ export async function inspectReceiverCandidateInventory(
         }
         const adapter: any = app.vault.adapter;
         if (!adapter || typeof adapter.getBasePath !== "function") return result("BLOCKED", "NO_DESKTOP_ROOT");
-        const paths = require("path").win32 as typeof import("path").win32;
-        const root = paths.normalize(String(adapter.getBasePath() || ""));
-        const isWindowsRoot = /^[A-Za-z]:\\/.test(root) && root.length > 3;
-        if (!isWindowsRoot) return result("BLOCKED", "INVALID_WINDOWS_ROOT");
+        const paths = (require("path") as typeof import("path"))[pathDialect];
+        const windows = pathDialect === "win32";
+        const canonicalPath = (value: string) => {
+            const normalized = paths.normalize(value);
+            return windows ? normalized.toLocaleLowerCase("en-US") : normalized.replace(/\/+$/, "");
+        };
+        const rawRoot = String(adapter.getBasePath() || "");
+        const root = windows ? paths.normalize(rawRoot) : canonicalPath(rawRoot);
+        const validRoot = windows
+            ? /^[A-Za-z]:\\/.test(root) && root.length > 3
+            : root.startsWith("/") && root === rawRoot.replace(/\/+$/, "");
+        if (!validRoot) return result("BLOCKED", windows ? "INVALID_WINDOWS_ROOT" : "INVALID_POSIX_ROOT");
         const fs = readOnlyFs || (require("fs").promises as FsReadOnly);
         const physical = await fs.realpath(root);
-        if (paths.normalize(physical).toLocaleLowerCase("en-US") !== root.toLocaleLowerCase("en-US"))
+        if (canonicalPath(physical) !== canonicalPath(root))
             return result("BLOCKED", "ROOT_REDIRECT_OR_JUNCTION");
-        if (sourcePhysicalRoot && paths.normalize(sourcePhysicalRoot).toLocaleLowerCase("en-US") === root.toLocaleLowerCase("en-US"))
-            return result("BLOCKED", "SAME_PHYSICAL_ROOT");
+        if (sourcePhysicalRoot) {
+            if (!windows && !paths.isAbsolute(sourcePhysicalRoot)) {
+                return result("BLOCKED", "INVALID_POSIX_SOURCE_ROOT");
+            }
+            const sourceRoot = windows ? sourcePhysicalRoot : await fs.realpath(sourcePhysicalRoot);
+            if (canonicalPath(sourceRoot) === canonicalPath(root)) {
+                return result("BLOCKED", "SAME_PHYSICAL_ROOT");
+            }
+        }
         const rootStat = await fs.lstat(root);
         if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return result("BLOCKED", "INVALID_ROOT_TYPE");
         if (Number.isFinite(rootStat.birthtimeMs) && Number(rootStat.birthtimeMs) > 0)
@@ -154,14 +176,16 @@ export async function inspectReceiverCandidateInventory(
         if (currentInstallation) {
             // A nested folder is not an independent Obsidian Vault, even if empty.
             let parent = paths.dirname(root);
-            while (parent !== paths.dirname(parent)) {
+            while (!windows || parent !== paths.dirname(parent)) {
                 try {
                     await fs.lstat(paths.join(parent, ".obsidian"));
                     return result("BLOCKED", "NESTED_INSIDE_ANOTHER_VAULT");
                 } catch (error: any) {
                     if (error?.code !== "ENOENT") return result("BLOCKED", "PARENT_ROOT_UNVERIFIABLE");
                 }
-                parent = paths.dirname(parent);
+                const ancestor = paths.dirname(parent);
+                if (ancestor === parent) break;
+                parent = ancestor;
             }
         }
         independentPhysicalRootVerified = Boolean(currentInstallation);
@@ -196,6 +220,7 @@ export async function inspectReceiverCandidateInventory(
                         pending.push({ absolute: target, relative: rel, depth: current.depth + 1 });
                     } else return result("BLOCKED", "UNEXPECTED_DIRECTORY_OR_HISTORY");
                 } else {
+                    if (!windows && !stat.isFile?.()) return result("BLOCKED", "NON_REGULAR_POSIX_ENTRY");
                     const config = current.relative === ".obsidian" && allowedConfigFiles.has(name);
                     const plugin = current.relative === ".obsidian/plugins/smartmd" && allowedPluginFiles.has(name);
                     if (rel === ".obsidian/plugins/smartmd/data.json" && currentInstallation) {
@@ -227,6 +252,89 @@ export async function inspectReceiverCandidateInventory(
                 : result("BLOCKED", "CURRENT_INSTALLATION_DATA_MISSING");
         }
         return result("EMPTY_INVENTORY_UNPROVEN", "TRUSTED_CREATION_ISSUER_MISSING");
+    } catch {
+        return result("BLOCKED", "INVENTORY_INCOMPLETE_OR_UNREADABLE");
+    }
+}
+
+/** Read-only Android App storage inventory. No installation or execution permission is issued here. */
+export async function inspectAndroidReceiverCandidateInventory(
+    app: App,
+    scope: ReceiverCurrentInstallation,
+    incomplete?: ReceiverIncompleteHistory,
+): Promise<ReceiverCandidateAudit> {
+    const vault = app.vault;
+    const adapter = vault.adapter;
+    const root = getAndroidAppStorageRoot(adapter);
+    let inspectedEntries = 0;
+    const result = (status: ReceiverCandidateAudit["status"], reason: string): ReceiverCandidateAudit => ({
+        status, reason, inspectedEntries, rootBirthtimeMs: null,
+        bindingAuthorized: false, independentPhysicalRootVerified: false,
+    });
+    const safe = (path: string) => Boolean(path) && path.split("/").every(
+        part => part && part !== "." && part !== ".." && !/[\\:\u0000-\u001f]/.test(part),
+    );
+    const currentRoot = () => vault.adapter === adapter && getAndroidAppStorageRoot(adapter) === root;
+    if (!root || vault.configDir !== ".obsidian") return result("BLOCKED", "ANDROID_PRIVATE_VAULT_UNPROVEN");
+    const tracked = new Set(incomplete?.trackedPaths ?? []);
+    const intent = incomplete?.android?.intent;
+    if (incomplete && ((!tracked.size && !incomplete.android) ||
+        [...tracked].some(path => !safe(path) || path.startsWith(".")) ||
+        (intent && (!safe(intent.path) || intent.path.startsWith(".") || tracked.has(intent.path) ||
+            !/^\.suite-staging\/onedrive\/[a-f0-9-]{36}\/payload\.bin$/.test(intent.stagingPath))))) {
+        return result("BLOCKED", "INVALID_INCOMPLETE_RECEIVER_HISTORY");
+    }
+    const observed = new Set<string>();
+    const directories = ["", ".obsidian", ".obsidian/plugins", ".obsidian/plugins/smartmd"];
+    const configPath = ".obsidian/plugins/smartmd/data.json";
+    let cleanState = false;
+    const pending = [""];
+    try {
+        while (pending.length) {
+            const parent = pending.pop()!;
+            if (!currentRoot()) return result("BLOCKED", "ANDROID_VAULT_CHANGED");
+            const list = await adapter.list(parent);
+            if (!currentRoot()) return result("BLOCKED", "ANDROID_VAULT_CHANGED");
+            for (const path of [...list.files, ...list.folders]) {
+                inspectedEntries++;
+                if (!safe(path) || path.slice(0, path.lastIndexOf("/") + 1) !== (parent ? parent + "/" : "") ||
+                    inspectedEntries > (incomplete ? 4096 : 256)) return result("BLOCKED", "INVENTORY_PATH_INVALID");
+            }
+            for (const directory of list.folders) {
+                if (!directories.includes(directory) && (!incomplete ||
+                    ![...tracked, ...(intent ? [intent.path] : [])].some(file => file.startsWith(directory + "/")) &&
+                    !/^\.suite-staging(?:\/onedrive(?:\/[^/]+)?)?$/.test(directory))) {
+                    return result("BLOCKED", "UNEXPECTED_DIRECTORY_OR_HISTORY");
+                }
+                pending.push(directory);
+            }
+            for (const path of list.files) {
+                if (!currentRoot()) return result("BLOCKED", "ANDROID_VAULT_CHANGED");
+                const name = path.slice(parent ? parent.length + 1 : 0);
+                if (path === configPath) {
+                    const stat = await adapter.stat(path);
+                    if (stat?.type !== "file" || stat.size <= 0 || stat.size > 512 * 1024) {
+                        return result("BLOCKED", "UNTRUSTED_SMARTMD_HISTORY");
+                    }
+                    const text = await adapter.read(path);
+                    cleanState = incomplete ? incompleteLocalSmartMDState(text, scope, incomplete)
+                        : freshLocalSmartMDState(text, scope);
+                    if (!cleanState) return result("BLOCKED", "UNTRUSTED_SMARTMD_HISTORY");
+                } else if (tracked.has(path)) {
+                    observed.add(path);
+                } else if (intent && (path === intent.path || path === intent.stagingPath)) {
+                    // The sync service independently verifies identity, size and bytes.
+                    continue;
+                } else if (!(parent === ".obsidian" && allowedConfigFiles.has(name)) &&
+                    !(parent === ".obsidian/plugins/smartmd" && allowedPluginFiles.has(name))) {
+                    return result("BLOCKED", "UNEXPECTED_FILE_OR_HISTORY");
+                }
+            }
+        }
+        if (!currentRoot()) return result("BLOCKED", "ANDROID_VAULT_CHANGED");
+        if (!cleanState || observed.size !== tracked.size) return result("BLOCKED", "ANDROID_HISTORY_INCOMPLETE");
+        return incomplete ? result("ELIGIBLE_INCOMPLETE_RECEIVER", "ANDROID_EXACT_TRACKED_HISTORY")
+            : result("ELIGIBLE_EMPTY_RECEIVER", "ANDROID_EMPTY_OWNED_APP_STORAGE");
     } catch {
         return result("BLOCKED", "INVENTORY_INCOMPLETE_OR_UNREADABLE");
     }

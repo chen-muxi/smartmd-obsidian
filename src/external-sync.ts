@@ -899,6 +899,7 @@ export class ExternalSyncService {
     }
 
     async chooseFolder(): Promise<string> {
+        if (!Platform.isDesktopApp) return "";
         // Level 1: 原生对话框探测
         try {
             const electron = require("electron");

@@ -1,12 +1,11 @@
 import { Plugin } from "obsidian";
-import { SmartMDRuntime, SmartMDSettingsTab, SMARTMD_BUILD_VERSION, SMARTMD_BUILD_FINGERPRINT } from "./src/runtime";
+import { SmartMDRuntime, SmartMDSettingsTab } from "./src/runtime";
 
 export default class SmartMDPlugin extends Plugin {
     private runtime!: SmartMDRuntime;
     private statusBarItem: HTMLElement | null = null;
 
     async onload(): Promise<void> {
-        console.log(`%c[SmartMD] 插件已加载 | 版本: ${SMARTMD_BUILD_VERSION} | 编译指纹: ${SMARTMD_BUILD_FINGERPRINT}`, "color: #10b981; font-weight: bold; font-size: 13px;");
         try {
             this.statusBarItem = this.addStatusBarItem();
             this.statusBarItem.setText("SmartMD: 就绪");
