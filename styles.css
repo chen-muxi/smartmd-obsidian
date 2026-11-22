@@ -8,23 +8,6 @@
     border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.smartmd-settings-kicker {
-    display: none;
-}
-
-.smartmd-settings-header .smartmd-settings-title {
-    border: 0;
-    margin: 0 0 8px;
-    padding: 0;
-}
-
-.smartmd-settings-header .smartmd-settings-title .setting-item-name {
-    color: var(--text-normal);
-    font-size: var(--h1-size);
-    font-weight: var(--h1-weight);
-    line-height: var(--h1-line-height);
-}
-
 .smartmd-settings-header p {
     max-width: 760px;
     margin: 0;

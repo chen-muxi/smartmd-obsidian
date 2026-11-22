@@ -26,8 +26,8 @@ import { PublishService } from "./publish";
 import { SmartKeepAuth } from "./smartkeep-auth";
 import { SyncFailureDiagnostic, SMARTKEEP_PUBLISH_URL } from "./types";
 
-export const SMARTMD_BUILD_VERSION = "1.0.21";
-export const SMARTMD_BUILD_FINGERPRINT = "community-1.0.21";
+export const SMARTMD_BUILD_VERSION = "1.0.22";
+export const SMARTMD_BUILD_FINGERPRINT = "community-1.0.22";
 
 export class SmartMDRuntime {
     private readonly aiPreview = new AIChatPreview();
@@ -698,8 +698,6 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
     private renderHeader(container: HTMLElement): void {
         const header = container.createDiv({ cls: "smartmd-settings-header" });
-        header.createDiv({ cls: "smartmd-settings-kicker", text: "SMARTMD" });
-        new Setting(header).setClass("smartmd-settings-title").setName("SmartMD").setHeading();
         header.createEl("p", { text: "本地知识库的发布、同步与 AI 编辑中心。每项能力独立运行，互不触发删除或回滚。" });
     }
 
@@ -1996,7 +1994,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
     }
 
     private aboutSection(container: HTMLElement): void {
-        new Setting(container).setClass("smartmd-settings-section-title").setName("关于 SmartMD").setHeading();
+        new Setting(container).setClass("smartmd-settings-section-title").setName("关于").setHeading();
         const project = container.createDiv({ cls: "smartmd-about-section" });
         new Setting(project).setClass("smartmd-settings-subheading").setName("项目介绍").setHeading();
         project.createEl("p", { text: "SmartMD 是一款面向 Obsidian 的本地知识库增强插件，提供 Markdown 发布、多设备同步、桌面外部文件夹同步、AI 辅助编辑能力。各项功能相互隔离，单项功能失败不会触发其他功能删除或回滚。" });
