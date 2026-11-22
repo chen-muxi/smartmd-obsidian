@@ -1,6 +1,6 @@
 import { EditorSelection, EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
-import { editorInfoField, type Editor } from "obsidian";
+import { editorInfoField, sanitizeHTMLToDom, type Editor } from "obsidian";
 import { marked } from "marked";
 import { applyReviewChanges, type ReviewChange } from "./ai-review-blocks";
 
@@ -20,8 +20,7 @@ const previewField = StateField.define<DecorationSet>({
 const previewTags = new Set("p h1 h2 h3 h4 h5 h6 blockquote ul ol li table thead tbody tr th td pre code strong em del br hr".split(" "));
 
 function renderDraft(root: HTMLElement, text: string): void {
-    const template = root.ownerDocument.createElement("template");
-    template.innerHTML = marked.parse(text, { gfm: true, async: false }) as string;
+    const preview = sanitizeHTMLToDom(marked.parse(text, { gfm: true, async: false }));
     const append = (container: Node, nodes: NodeListOf<ChildNode>) => {
         for (const node of Array.from(nodes)) {
             if (node.nodeType === 3) {
@@ -38,7 +37,7 @@ function renderDraft(root: HTMLElement, text: string): void {
             }
         }
     };
-    append(root, template.content.childNodes);
+    append(root, preview.childNodes);
 }
 
 class NewTextWidget extends WidgetType {

@@ -17,7 +17,7 @@ import {
 import { AIEditorView, AI_VIEW_TYPE, type ChatQuote } from "./ai-editor";
 import { AIChatPreview } from "./ai-chat-preview";
 import { modelSettings, testModelConnection } from "./ai-model";
-import { MicrosoftAuth, SmartMDStore } from "./core";
+import { getDevicePlatformName, MicrosoftAuth, SmartMDStore } from "./core";
 import { MicrosoftDeviceCodeModal } from "./microsoft-device-modal";
 import { ExternalSyncService } from "./external-sync";
 import { OneDriveSyncService } from "./onedrive";
@@ -26,8 +26,8 @@ import { PublishService } from "./publish";
 import { SmartKeepAuth } from "./smartkeep-auth";
 import { SyncFailureDiagnostic, SMARTKEEP_PUBLISH_URL } from "./types";
 
-export const SMARTMD_BUILD_VERSION = "1.0.20";
-export const SMARTMD_BUILD_FINGERPRINT = "community-1.0.20";
+export const SMARTMD_BUILD_VERSION = "1.0.21";
+export const SMARTMD_BUILD_FINGERPRINT = "community-1.0.21";
 
 export class SmartMDRuntime {
     private readonly aiPreview = new AIChatPreview();
@@ -116,10 +116,8 @@ export class SmartMDRuntime {
         const inheritedHistory = Boolean(settings.deviceId && settings.deviceId !== deviceId);
         const pollutedHistory = Object.keys(settings.fileStates || {}).some((path) => /^\.suite-staging\//i.test(path));
         settings.deviceId = deviceId;
-        if (Platform.isMobile || !settings.deviceName) {
-            settings.deviceName = Platform.isMobile
-                ? (Platform.isIosApp ? "iOS" : "Android")
-                : String(navigator.platform || "Desktop");
+        if (!settings.deviceName) {
+            settings.deviceName = getDevicePlatformName();
         }
         if (inheritedHistory || pollutedHistory) {
             // Keep old sync baselines and pending actions as read-only evidence.
@@ -701,7 +699,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
     private renderHeader(container: HTMLElement): void {
         const header = container.createDiv({ cls: "smartmd-settings-header" });
         header.createDiv({ cls: "smartmd-settings-kicker", text: "SMARTMD" });
-        header.createEl("h1", { text: "SmartMD" });
+        new Setting(header).setClass("smartmd-settings-title").setName("SmartMD").setHeading();
         header.createEl("p", { text: "本地知识库的发布、同步与 AI 编辑中心。每项能力独立运行，互不触发删除或回滚。" });
     }
 
@@ -860,7 +858,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const local = (this.runtime.store as any).settings.local;
         const shared = (this.runtime.store as any).settings.shared;
         const signedIn = this.runtime.isSmartKeepSignedIn();
-        container.createEl("h2", { text: "云端发布" });
+        new Setting(container).setClass("smartmd-settings-section-title").setName("云端发布").setHeading();
         container.createEl("p", { text: "SmartKeep MD 只保留最新版 Markdown 和问题反馈，不保存本地图片或正文历史版本。公开链接会自动保存到 SmartKeep，密码内容不会生成书签。" });
         new Setting(container)
             .setName(signedIn ? `发布账号：${local.smartkeepAccountName}` : "发布账号：尚未登录")
@@ -930,14 +928,16 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const statusDescription = nextCheckAt
             ? `${this.runtime.oneDrive.statusText()}；下次检查：${new Date(Math.max(Date.now(), nextCheckAt)).toLocaleString()}`
             : this.runtime.oneDrive.statusText();
-        container.createEl("h2", { text: "OneDrive 多设备同步" });
+        new Setting(container).setClass("smartmd-settings-section-title").setName("OneDrive 多设备同步").setHeading();
         container.createEl("p", { text: `使用插件独立空间同步知识库文件与非敏感插件状态。授权、模型密钥、外部路径和设备历史不会跨设备同步。${this.runtime.store.storageBoundaryText()}` });
         const buildInfo = container.createEl("div", { cls: "smartmd-build-info" });
-        buildInfo.style.fontSize = "11px";
-        buildInfo.style.color = "var(--text-muted)";
-        buildInfo.style.marginBottom = "10px";
+        buildInfo.setCssStyles({
+            fontSize: "11px",
+            color: "var(--text-muted)",
+            marginBottom: "10px",
+        });
         buildInfo.setText(`运行实例：v${SMARTMD_BUILD_VERSION}（指纹：${SMARTMD_BUILD_FINGERPRINT}）`);
-        container.createEl("h3", { text: "微软账号" });
+        new Setting(container).setClass("smartmd-settings-subheading").setName("微软账号").setHeading();
         this.microsoftAccountSetting(container);
         if (!this.runtime.isMicrosoftSignedIn() && !this.runtime.isMicrosoftSignInPending()) {
             this.browserLoginFallbackSetting(container);
@@ -1021,7 +1021,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const identityConflict = this.runtime.oneDrive.getOneDriveRemoteIdentityConflict();
         if (identityConflict) {
             const section = container.createDiv({ cls: "smartmd-onedrive-identity-conflict" });
-            section.createEl("h3", { text: "云端重复身份，已停止同步" });
+            new Setting(section).setClass("smartmd-settings-subheading").setName("云端重复身份，已停止同步").setHeading();
             section.createEl("p", { text: "冲突路径：" + identityConflict.path });
             for (const item of identityConflict.items) section.createEl("p", { text:
                 "路径：" + item.path + "；Item ID：" + item.id + "；ETag：" + item.etag });
@@ -1038,7 +1038,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
         if (settings.firstSyncCompleted && settings.confirmed && !this.runtime.oneDrive.canRun()) {
             const section = container.createDiv({ cls: "smartmd-onedrive-resume-review" });
-            section.createEl("h3", { text: "重启后同步范围必须重新确认" });
+            new Setting(section).setClass("smartmd-settings-subheading").setName("重启后同步范围必须重新确认").setHeading();
             section.createEl("p", { text:
                 "已保留历史账号、知识库和已完成文件记录，但旧上传、下载、删除和自动许可全部失效。先只读扫描云端完整清单和本地SHA，再逐项确认当前版本；未决冲突和删除继续锁定。" });
             const dailyButton = section.createEl("button", { text: "核对后恢复本次日常同步" });
@@ -1192,7 +1192,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             .filter(([, record]: [string, any]) => record?.phase === "RECONCILE_REQUIRED");
         if (pendingUnknown.length) {
             const section = container.createDiv({ cls: "smartmd-onedrive-unknown-review" });
-            section.createEl("h3", { text: "OneDrive 上次上传结果未明：" + pendingUnknown.length + " 项" });
+            new Setting(section).setClass("smartmd-settings-subheading").setName("OneDrive 上次上传结果未明：" + pendingUnknown.length + " 项").setHeading();
             section.createEl("p", { text:
                 "历史上传默认锁定且绝不重传。先独立只读核原操作、云端目标、暂存副本及本机SHA；只有完全匹配时才能对该文件单独二次确认结算，其他范围仍暂停。" });
             const button = section.createEl("button", { text: "只读检查上次未知上传（不修改云端）" });
@@ -1301,7 +1301,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                     String(record?.phase || "")));
         if (interruptedCleanup.length) {
             const section = container.createDiv({ cls: "smartmd-onedrive-interrupted-cleanup" });
-            section.createEl("h3", { text: "OneDrive 待结算的上传清理：" + interruptedCleanup.length + " 项" });
+            new Setting(section).setClass("smartmd-settings-subheading").setName("OneDrive 待结算的上传清理：" + interruptedCleanup.length + " 项").setHeading();
             section.createEl("p", { text:
                 "历史可信基线已保存，但原暂存清理的结果可能未知。只有独立核对目标字节、原操作身份及暂存现状后，才能单文件确认恢复；不重传母文件。" });
             for (const [path] of interruptedCleanup) {
@@ -1375,7 +1375,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const unresolvedConflicts = this.runtime.oneDrive.listPendingOneDriveConflicts();
         if (unresolvedConflicts.length) {
             const section = container.createDiv({ cls: "smartmd-onedrive-conflict-review" });
-            section.createEl("h3", { text: "OneDrive 未决双端冲突：" + unresolvedConflicts.length + " 项" });
+            new Setting(section).setClass("smartmd-settings-subheading").setName("OneDrive 未决双端冲突：" + unresolvedConflicts.length + " 项").setHeading();
             section.createEl("p", { text:
                 "默认继续锁定，绝不自动覆盖、合并或删除任一版本。逐条检查双方文件和 SHA/ETag 后，只能明确选择保留双方。" });
             for (const item of unresolvedConflicts) {
@@ -1436,7 +1436,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const pending = this.runtime.oneDrive.listPendingOneDriveDeletions();
         if (pending.length) {
             const area = container.createDiv({ cls: "smartmd-onedrive-delete-review" });
-            area.createEl("h3", { text: "待人工确认的单端删除（" + pending.length + "项）" });
+            new Setting(area).setClass("smartmd-settings-subheading").setName("待人工确认的单端删除（" + pending.length + "项）").setHeading();
             area.createEl("p", { text:
                 "一端文件不存在不代表允许删除另一端。请逐项确认目标/版本；将先核验恢复档案与当前文件版本，任何变化则安全停止。" });
             const chosen = new Set<string>();
@@ -1471,7 +1471,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const recoveries = this.runtime.oneDrive.listOneDriveRecoveries();
         if (recoveries.length) {
             const area = container.createDiv({ cls: "smartmd-onedrive-recoveries" });
-            area.createEl("h3", { text: "OneDrive 独立恢复档案：" + recoveries.length + "项" });
+            new Setting(area).setClass("smartmd-settings-subheading").setName("OneDrive 独立恢复档案：" + recoveries.length + "项").setHeading();
             area.createEl("p", { text:
                 "未解决、无法验证或唯一副本不会自动销毁。需要先另存旧版并核验，再明确确认问题解决。" });
             for (const item of recoveries) {
@@ -1573,18 +1573,22 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
         if (summary) {
             const summaryDiv = container.createEl("div", { cls: "smartmd-sync-summary" });
-            summaryDiv.style.margin = "10px 0";
-            summaryDiv.style.padding = "10px 14px";
-            summaryDiv.style.borderRadius = "6px";
-            summaryDiv.style.backgroundColor = "var(--background-secondary)";
-            summaryDiv.style.border = "1px solid var(--background-modifier-border)";
-            summaryDiv.style.fontSize = "13px";
+            summaryDiv.setCssStyles({
+                margin: "10px 0",
+                padding: "10px 14px",
+                borderRadius: "6px",
+                backgroundColor: "var(--background-secondary)",
+                border: "1px solid var(--background-modifier-border)",
+                fontSize: "13px",
+            });
 
             const summaryTitle = summaryDiv.createEl("div");
-            summaryTitle.style.fontWeight = "bold";
-            summaryTitle.style.marginBottom = "6px";
-            summaryTitle.style.display = "flex";
-            summaryTitle.style.justifyContent = "space-between";
+            summaryTitle.setCssStyles({
+                fontWeight: "bold",
+                marginBottom: "6px",
+                display: "flex",
+                justifyContent: "space-between",
+            });
 
             const statusBadge = settings.status === "ready"
                 ? "🟢 全部同步成功"
@@ -1600,32 +1604,45 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             }
 
             const statsRow = summaryDiv.createEl("div");
-            statsRow.style.display = "flex";
-            statsRow.style.gap = "16px";
-            statsRow.style.color = "var(--text-muted)";
-            statsRow.innerHTML = `<span>总计: <b>${summary.total}</b></span>`
-                + `<span style="color:var(--text-success)">成功: <b>${summary.success}</b></span>`
-                + `<span style="color:${summary.failed > 0 ? "var(--text-error)" : "inherit"}">失败: <b>${summary.failed}</b></span>`
-                + `<span>未变更: <b>${summary.unchanged}</b></span>`;
+            statsRow.setCssStyles({
+                display: "flex",
+                gap: "16px",
+                color: "var(--text-muted)",
+            });
+            const counts: Array<[string, number, string?]> = [
+                ["总计", summary.total],
+                ["成功", summary.success, "var(--text-success)"],
+                ["失败", summary.failed, summary.failed > 0 ? "var(--text-error)" : undefined],
+                ["未变更", summary.unchanged],
+            ];
+            for (const [label, count, color] of counts) {
+                const item = statsRow.createSpan({ text: label + ": " });
+                if (color) item.setCssStyles({ color });
+                item.createEl("b", { text: String(count) });
+            }
         }
 
         if (diagnostics.length > 0) {
             const diagSection = container.createEl("div", { cls: "smartmd-diagnostic-center" });
-            diagSection.style.margin = "12px 0";
-            diagSection.style.padding = "12px";
-            diagSection.style.borderRadius = "8px";
-            diagSection.style.border = "1px solid var(--text-error)";
-            diagSection.style.backgroundColor = "rgba(239, 68, 68, 0.05)";
+            diagSection.setCssStyles({
+                margin: "12px 0",
+                padding: "12px",
+                borderRadius: "8px",
+                border: "1px solid var(--text-error)",
+                backgroundColor: "rgba(239, 68, 68, 0.05)",
+            });
 
             const diagHeader = diagSection.createEl("div");
-            diagHeader.style.display = "flex";
-            diagHeader.style.justifyContent = "space-between";
-            diagHeader.style.alignItems = "center";
-            diagHeader.style.marginBottom = "10px";
+            diagHeader.setCssStyles({
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: "10px",
+            });
 
             const headerLeft = diagHeader.createEl("div");
-            headerLeft.createEl("h4", { text: `⚠️ 失败文件智能诊断中心 (${diagnostics.length} 项需要调整)`, cls: "smartmd-diag-title" });
-            headerLeft.style.margin = "0";
+            new Setting(headerLeft).setClass("smartmd-diag-title").setName(`⚠️ 失败文件智能诊断中心 (${diagnostics.length} 项需要调整)`).setHeading();
+            headerLeft.setCssStyles({ margin: "0" });
 
             const retryBtn = diagHeader.createEl("button", { text: "仅重试失败项", cls: "mod-cta" });
             retryBtn.onclick = async () => {
@@ -1640,27 +1657,35 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
             for (const diag of diagnostics) {
                 const card = diagSection.createEl("div", { cls: "smartmd-diag-card" });
-                card.style.margin = "8px 0";
-                card.style.padding = "10px 12px";
-                card.style.borderRadius = "6px";
-                card.style.backgroundColor = "var(--background-primary)";
-                card.style.border = "1px solid var(--background-modifier-border)";
+                card.setCssStyles({
+                    margin: "8px 0",
+                    padding: "10px 12px",
+                    borderRadius: "6px",
+                    backgroundColor: "var(--background-primary)",
+                    border: "1px solid var(--background-modifier-border)",
+                });
 
                 // 标题行
                 const cardTitle = card.createEl("div");
-                cardTitle.style.display = "flex";
-                cardTitle.style.justifyContent = "space-between";
-                cardTitle.style.fontWeight = "bold";
+                cardTitle.setCssStyles({
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontWeight: "bold",
+                });
                 cardTitle.createSpan({ text: `📄 ${diag.relativePath}` });
                 const badge = cardTitle.createSpan({ text: `[${diag.remediation?.badgeText || "失败"}]` });
-                badge.style.color = "var(--text-error)";
-                badge.style.fontSize = "12px";
+                badge.setCssStyles({
+                    color: "var(--text-error)",
+                    fontSize: "12px",
+                });
 
                 // 凭什么失败（技术证据）
                 const evDiv = card.createEl("div");
-                evDiv.style.fontSize = "12px";
-                evDiv.style.color = "var(--text-muted)";
-                evDiv.style.marginTop = "4px";
+                evDiv.setCssStyles({
+                    fontSize: "12px",
+                    color: "var(--text-muted)",
+                    marginTop: "4px",
+                });
                 const ev = diag.evidence || {} as any;
                 evDiv.createEl("b", { text: "【凭什么失败】 " });
                 evDiv.createSpan({ text: `HTTP ${ev.httpStatus || 0} (${ev.gatewayErrorCode || "未知代码"})` });
@@ -1671,27 +1696,33 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
                 // 为什么这几个会失败（通俗说明）
                 const reasonDiv = card.createEl("div");
-                reasonDiv.style.fontSize = "12px";
-                reasonDiv.style.marginTop = "4px";
+                reasonDiv.setCssStyles({
+                    fontSize: "12px",
+                    marginTop: "4px",
+                });
                 reasonDiv.createEl("b", { text: "【为什么失败】 " });
                 reasonDiv.createSpan({ text: `${diag.humanReason}：${diag.humanExplanation}` });
 
                 // 要怎么调整才能不失败（行动指南）
                 const remDiv = card.createEl("div");
-                remDiv.style.fontSize = "12px";
-                remDiv.style.marginTop = "4px";
-                remDiv.style.color = "var(--text-accent)";
+                remDiv.setCssStyles({
+                    fontSize: "12px",
+                    marginTop: "4px",
+                    color: "var(--text-accent)",
+                });
                 remDiv.createEl("b", { text: "【怎么调整】 " });
                 remDiv.createEl("span", { text: diag.remediation?.actionTitle || "操作指引" });
                 const instructList = remDiv.createEl("div");
-                instructList.style.marginTop = "2px";
+                instructList.setCssStyles({ marginTop: "2px" });
                 for (const line of (diag.remediation?.stepInstructions || [])) {
                     instructList.createEl("div", { text: line });
                 }
                 if (diag.remediation?.suggestedNewPath) {
                     const suggestP = remDiv.createEl("div");
-                    suggestP.style.marginTop = "4px";
-                    suggestP.style.color = "var(--text-success)";
+                    suggestP.setCssStyles({
+                        marginTop: "4px",
+                        color: "var(--text-success)",
+                    });
                     suggestP.createSpan({ text: "建议更名为：" });
                     suggestP.createEl("code", { text: diag.remediation.suggestedNewPath });
                 }
@@ -1796,7 +1827,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
     }
 
     private externalSection(container: HTMLElement): void {
-        container.createEl("h2", { text: "外部文件夹同步" });
+        new Setting(container).setClass("smartmd-settings-section-title").setName("外部文件夹同步").setHeading();
         container.createEl("p", {
             text: "选择知识库外部的文件夹后，插件会扫描该文件夹及子目录中的全部 Markdown 文档，保留原有目录结构，并在知识库的“外部同步文件夹”中建立副本。之后无论修改知识库内的副本，还是修改外部文件夹中的原文档，另一端都会实时同步更新。图片、代码和附件不会被同步或改动。",
         });
@@ -1816,7 +1847,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
         for (const binding of bindings) {
             const item = list.createDiv({ cls: "smartmd-external-inline-item" });
-            item.createEl("h3", { text: binding.nickname });
+            new Setting(item).setClass("smartmd-settings-subheading").setName(binding.nickname).setHeading();
             const pathRow = item.createDiv({ cls: "smartmd-external-inline-path-row" });
             pathRow.createDiv({ cls: "smartmd-external-inline-path", text: binding.externalPath });
             const actions = pathRow.createDiv({ cls: "smartmd-external-inline-actions" });
@@ -1851,7 +1882,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         }
         const archives = this.runtime.external?.recoveryArchives() || [];
         if (archives.length) {
-            container.createEl("h3", { text: "已解绑项目的 7 天恢复区" });
+            new Setting(container).setClass("smartmd-settings-subheading").setName("已解绑项目的 7 天恢复区").setHeading();
             for (const archive of archives) {
                 for (const recovery of archive.recoveryItems || []) {
                     new Setting(container)
@@ -1939,7 +1970,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         this.aiAddressShown = shared.aiApiUrl;
         this.aiModelShown = shared.aiModel;
         let keyInput: HTMLInputElement | undefined;
-        container.createEl("h2", { text: "基础 AI 编辑器" });
+        new Setting(container).setClass("smartmd-settings-section-title").setName("基础 AI 编辑器").setHeading();
         container.createEl("p", { text: "支持兼容 OpenAI Chat Completions（/chat/completions）的接口。按服务文档填写地址、模型 ID 和所需的 API Key。" });
         container.createEl("p", { text: "AI 编辑里的「联网搜索」使用 Responses（/responses）。请选用服务商开放搜索的模型。下方的连接测试检查普通编辑。" });
         container.createEl("p", { text: this.runtime.store.storageBoundaryText() });
@@ -2025,9 +2056,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
     }
 
     private aboutSection(container: HTMLElement): void {
-        container.createEl("h2", { text: "关于 SmartMD" });
+        new Setting(container).setClass("smartmd-settings-section-title").setName("关于 SmartMD").setHeading();
         const project = container.createDiv({ cls: "smartmd-about-section" });
-        project.createEl("h3", { text: "项目介绍" });
+        new Setting(project).setClass("smartmd-settings-subheading").setName("项目介绍").setHeading();
         project.createEl("p", { text: "SmartMD 是一款面向 Obsidian 的本地知识库增强插件，提供 Markdown 发布、多设备同步、桌面外部文件夹同步、AI 辅助编辑能力。各项功能相互隔离，单项功能失败不会触发其他功能删除或回滚。" });
         const principles = project.createEl("ul");
         for (const text of [
@@ -2039,17 +2070,17 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         ]) principles.createEl("li", { text });
 
         const mainSite = container.createDiv({ cls: "smartmd-about-section" });
-        mainSite.createEl("h3", { text: "SmartKeep 主站" });
+        new Setting(mainSite).setClass("smartmd-settings-subheading").setName("SmartKeep 主站").setHeading();
         mainSite.createEl("p", { text: "SmartKeep 是一个智能书签管理工具，可以帮助用户分类保存网页、整理资料、管理公开分享链接，并逐步形成个人网络知识入口。SmartKeep 负责书签和账号授权，SmartKeep MD 负责 Markdown 发布，两个站点不会自动读取彼此的私人内容。" });
         mainSite.createEl("button", { text: "访问 SmartKeep", cls: "mod-cta" }).onclick = () => window.open("https://smartkeep.me", "_blank");
 
         const contact = container.createDiv({ cls: "smartmd-about-section" });
-        contact.createEl("h3", { text: "联系管理员" });
+        new Setting(contact).setClass("smartmd-settings-subheading").setName("联系管理员").setHeading();
         contact.createEl("p", { text: "管理员邮箱：support@smartkeep.me。反馈问题时建议附上插件版本、设备类型和问题现象；涉及资料安全时请在标题中注明“数据安全问题”。" });
         contact.createEl("button", { text: "发送邮件" }).onclick = () => window.open("mailto:support@smartkeep.me?subject=SmartKeep%20Connect%20问题反馈", "_blank");
 
         const roadmap = container.createDiv({ cls: "smartmd-about-section" });
-        roadmap.createEl("h3", { text: "未来更新计划" });
+        new Setting(roadmap).setClass("smartmd-settings-subheading").setName("未来更新计划").setHeading();
         roadmap.createEl("p", { text: "以下方向仍处于规划阶段，不承诺具体上线时间：" });
         const list = roadmap.createEl("ul");
         for (const text of [

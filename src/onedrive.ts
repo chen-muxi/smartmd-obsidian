@@ -244,8 +244,10 @@ export class SyncPreviewModal extends Modal {
                     continue;
                 }
                 const row = files.createEl("li").createEl("details");
-                row.style.overflowWrap = "anywhere";
-                row.style.minWidth = "0";
+                row.setCssStyles({
+                    overflowWrap: "anywhere",
+                    minWidth: "0",
+                });
                 row.createEl("summary", { text: redactOneDriveText(path) +
                     "；来源：" + item.source + "；" + direction +
                     (item.skipReasons.length ? "；" + item.skipReasons.join("；") : "") });
@@ -263,7 +265,7 @@ export class SyncPreviewModal extends Modal {
             }
         }
         const progress = this.contentEl.createEl("p");
-        progress.style.display = "none";
+        progress.setCssStyles({ display: "none" });
         const actions = this.contentEl.createDiv({ cls: "smartmd-actions" });
         actions.createEl("button", { text: "取消" }).onclick = () => this.close();
         const start = actions.createEl("button", { text: this.commitEnabled ? "确认并开始同步" : "尚未开放首次同步", cls: "mod-cta" });

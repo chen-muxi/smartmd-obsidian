@@ -12,9 +12,13 @@
     display: none;
 }
 
-.smartmd-settings-header h1 {
-    display: block;
+.smartmd-settings-header .smartmd-settings-title {
+    border: 0;
     margin: 0 0 8px;
+    padding: 0;
+}
+
+.smartmd-settings-header .smartmd-settings-title .setting-item-name {
     color: var(--text-normal);
     font-size: var(--h1-size);
     font-weight: var(--h1-weight);
@@ -94,10 +98,13 @@
     text-indent: 0 !important;
 }
 
-.smartmd-settings-content > h2:first-child,
-.smartmd-settings-content > h2 {
-    margin-top: 0;
-    margin-bottom: 8px;
+.smartmd-settings-content > .smartmd-settings-section-title {
+    border: 0;
+    margin: 0 0 8px;
+    padding: 0;
+}
+
+.smartmd-settings-content > .smartmd-settings-section-title .setting-item-name {
     color: var(--text-normal);
     font-size: var(--h2-size, 1.4em);
     font-weight: var(--h2-weight, 600);
@@ -111,9 +118,13 @@
     line-height: 1.55;
 }
 
-.smartmd-settings-content > h3 {
-    margin-top: 20px;
-    margin-bottom: 8px;
+.smartmd-settings-content > .smartmd-settings-subheading {
+    border: 0;
+    margin: 20px 0 8px;
+    padding: 0;
+}
+
+.smartmd-settings-content > .smartmd-settings-subheading .setting-item-name {
     color: var(--text-normal);
     font-size: var(--h3-size, 1.2em);
     font-weight: var(--h3-weight, 600);
@@ -502,7 +513,7 @@
     background: var(--background-secondary);
 }
 
-.smartmd-external-inline-item h3 {
+.smartmd-external-inline-item .smartmd-settings-subheading {
     margin: 0 0 10px !important;
     margin-left: 0 !important;
     margin-inline-start: 0 !important;
@@ -560,7 +571,7 @@
     background: var(--background-secondary);
 }
 
-.smartmd-about-section h3 {
+.smartmd-about-section .smartmd-settings-subheading {
     margin: 0 0 8px !important;
     margin-left: 0 !important;
     margin-inline-start: 0 !important;

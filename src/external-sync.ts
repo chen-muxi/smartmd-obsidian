@@ -88,19 +88,23 @@ class ExternalBindingModal extends Modal {
 
         // 筛选规则设置折叠区
         const filterDetails = this.contentEl.createEl("details", { cls: "smartmd-external-filter-details" });
-        filterDetails.style.marginTop = "16px";
-        filterDetails.style.marginBottom = "16px";
-        filterDetails.style.border = "1px solid var(--background-modifier-border)";
-        filterDetails.style.borderRadius = "var(--radius-m)";
-        filterDetails.style.padding = "10px 14px";
-        filterDetails.style.backgroundColor = "var(--background-secondary)";
+        filterDetails.setCssStyles({
+            marginTop: "16px",
+            marginBottom: "16px",
+            border: "1px solid var(--background-modifier-border)",
+            borderRadius: "var(--radius-m)",
+            padding: "10px 14px",
+            backgroundColor: "var(--background-secondary)",
+        });
 
         const filterSummary = filterDetails.createEl("summary", { text: "⚙️ 筛选规则设置（默认已自动排除 node_modules 等构建依赖）" });
-        filterSummary.style.cursor = "pointer";
-        filterSummary.style.fontWeight = "bold";
+        filterSummary.setCssStyles({
+            cursor: "pointer",
+            fontWeight: "bold",
+        });
 
         const filterContent = filterDetails.createDiv();
-        filterContent.style.marginTop = "12px";
+        filterContent.setCssStyles({ marginTop: "12px" });
 
         // 模式选择
         const modeRow = filterContent.createDiv({ cls: "smartmd-external-field" });
@@ -111,7 +115,7 @@ class ExternalBindingModal extends Modal {
 
         // 开箱即用推荐项
         const presetBuildRow = filterContent.createDiv();
-        presetBuildRow.style.margin = "6px 0";
+        presetBuildRow.setCssStyles({ margin: "6px 0" });
         const presetBuildCheck = presetBuildRow.createEl("input", { type: "checkbox" });
         presetBuildCheck.checked = true;
         presetBuildCheck.id = "preset-build-new";
@@ -119,7 +123,7 @@ class ExternalBindingModal extends Modal {
         presetBuildLabel.htmlFor = "preset-build-new";
 
         const presetIDERow = filterContent.createDiv();
-        presetIDERow.style.margin = "6px 0";
+        presetIDERow.setCssStyles({ margin: "6px 0" });
         const presetIDECheck = presetIDERow.createEl("input", { type: "checkbox" });
         presetIDECheck.checked = true;
         presetIDECheck.id = "preset-ide-new";
@@ -128,13 +132,15 @@ class ExternalBindingModal extends Modal {
 
         // 自定义规则文本框
         const rulesField = filterContent.createDiv({ cls: "smartmd-external-field" });
-        rulesField.style.marginTop = "10px";
+        rulesField.setCssStyles({ marginTop: "10px" });
         rulesField.createEl("label", { text: "自定义规则（每行一条通配符或精确名称，例如 archive/** 或 *draft*）" });
         const rulesTextarea = rulesField.createEl("textarea");
         rulesTextarea.rows = 3;
         rulesTextarea.placeholder = "例如：\narchive/**\n*draft*\nREADME.md";
-        rulesTextarea.style.width = "100%";
-        rulesTextarea.style.boxSizing = "border-box";
+        rulesTextarea.setCssStyles({
+            width: "100%",
+            boxSizing: "border-box",
+        });
 
         const actions = this.contentEl.createDiv({ cls: "smartmd-external-actions" });
         actions.createEl("button", { text: "取消" }).onclick = () => this.close();
@@ -258,8 +264,10 @@ export class ExternalFilterModal extends Modal {
         const intro = this.contentEl.createEl("p", {
             text: "配置此文件夹同步时的过滤规则。修改规则后系统会自动重校准同步基线；受排除的已同步镜像会移入 Obsidian 回收站；外部源目录绝不删除，未同步创作必须先冷备成功。",
         });
-        intro.style.color = "var(--text-muted)";
-        intro.style.fontSize = "var(--font-ui-small)";
+        intro.setCssStyles({
+            color: "var(--text-muted)",
+            fontSize: "var(--font-ui-small)",
+        });
 
         // 1. 模式选择
         const modeField = this.contentEl.createDiv({ cls: "smartmd-external-field" });
@@ -277,7 +285,7 @@ export class ExternalFilterModal extends Modal {
         presetsBox.createEl("h4", { text: "开箱即用推荐预设", attr: { style: "margin: 0 0 8px;" } });
 
         const presetBuildRow = presetsBox.createDiv();
-        presetBuildRow.style.margin = "6px 0";
+        presetBuildRow.setCssStyles({ margin: "6px 0" });
         const buildCheck = presetBuildRow.createEl("input", { type: "checkbox" });
         buildCheck.id = "modal-preset-build";
         buildCheck.checked = this.filterConfig.builtinPresets.ignoreBuildArtifacts !== false;
@@ -288,7 +296,7 @@ export class ExternalFilterModal extends Modal {
         buildLabel.htmlFor = "modal-preset-build";
 
         const presetIDERow = presetsBox.createDiv();
-        presetIDERow.style.margin = "6px 0";
+        presetIDERow.setCssStyles({ margin: "6px 0" });
         const ideCheck = presetIDERow.createEl("input", { type: "checkbox" });
         ideCheck.id = "modal-preset-ide";
         ideCheck.checked = this.filterConfig.builtinPresets.ignoreIDEConfig !== false;
@@ -300,20 +308,24 @@ export class ExternalFilterModal extends Modal {
 
         // 3. 用户自定义规则列表
         const rulesHeader = this.contentEl.createDiv();
-        rulesHeader.style.display = "flex";
-        rulesHeader.style.justifyContent = "space-between";
-        rulesHeader.style.alignItems = "center";
-        rulesHeader.style.marginTop = "16px";
-        rulesHeader.style.marginBottom = "8px";
+        rulesHeader.setCssStyles({
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginTop: "16px",
+            marginBottom: "8px",
+        });
         rulesHeader.createEl("label", { text: `自定义规则 (${this.filterConfig.userRules.length} 条)`, attr: { style: "font-weight: bold;" } });
 
         const ruleListContainer = this.contentEl.createDiv();
-        ruleListContainer.style.maxHeight = "220px";
-        ruleListContainer.style.overflowY = "auto";
-        ruleListContainer.style.border = "1px solid var(--background-modifier-border)";
-        ruleListContainer.style.borderRadius = "var(--radius-m)";
-        ruleListContainer.style.padding = "8px";
-        ruleListContainer.style.backgroundColor = "var(--background-secondary)";
+        ruleListContainer.setCssStyles({
+            maxHeight: "220px",
+            overflowY: "auto",
+            border: "1px solid var(--background-modifier-border)",
+            borderRadius: "var(--radius-m)",
+            padding: "8px",
+            backgroundColor: "var(--background-secondary)",
+        });
 
         if (this.filterConfig.userRules.length === 0) {
             ruleListContainer.createEl("p", {
@@ -324,41 +336,49 @@ export class ExternalFilterModal extends Modal {
             for (let i = 0; i < this.filterConfig.userRules.length; i++) {
                 const rule = this.filterConfig.userRules[i];
                 const row = ruleListContainer.createDiv();
-                row.style.display = "flex";
-                row.style.alignItems = "center";
-                row.style.gap = "8px";
-                row.style.padding = "4px 8px";
-                row.style.borderBottom = i < this.filterConfig.userRules.length - 1 ? "1px solid var(--background-modifier-border)" : "none";
+                row.setCssStyles({
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "4px 8px",
+                    borderBottom: i < this.filterConfig.userRules.length - 1 ? "1px solid var(--background-modifier-border)" : "none",
+                });
 
                 // 类型徽章
                 const syntaxBadge = row.createEl("span", {
                     text: rule.syntax === "exact" ? "精确" : rule.syntax === "regex" ? "正则" : "通配符",
                 });
-                syntaxBadge.style.fontSize = "11px";
-                syntaxBadge.style.padding = "2px 6px";
-                syntaxBadge.style.borderRadius = "4px";
-                syntaxBadge.style.backgroundColor = rule.syntax === "exact" ? "var(--interactive-accent)" : "var(--background-modifier-border)";
-                syntaxBadge.style.color = rule.syntax === "exact" ? "var(--text-on-accent)" : "var(--text-normal)";
+                syntaxBadge.setCssStyles({
+                    fontSize: "11px",
+                    padding: "2px 6px",
+                    borderRadius: "4px",
+                    backgroundColor: rule.syntax === "exact" ? "var(--interactive-accent)" : "var(--background-modifier-border)",
+                    color: rule.syntax === "exact" ? "var(--text-on-accent)" : "var(--text-normal)",
+                });
 
                 // 维度徽章
                 const targetBadge = row.createEl("span", {
                     text: rule.target === "folder" ? "文件夹" : rule.target === "file" ? "文件" : "全部",
                 });
-                targetBadge.style.fontSize = "11px";
-                targetBadge.style.padding = "2px 6px";
-                targetBadge.style.borderRadius = "4px";
-                targetBadge.style.backgroundColor = "var(--background-primary)";
-                targetBadge.style.color = "var(--text-muted)";
+                targetBadge.setCssStyles({
+                    fontSize: "11px",
+                    padding: "2px 6px",
+                    borderRadius: "4px",
+                    backgroundColor: "var(--background-primary)",
+                    color: "var(--text-muted)",
+                });
 
                 // 模式内容
                 const patText = row.createEl("span", { text: rule.pattern });
-                patText.style.flex = "1";
-                patText.style.fontFamily = "var(--font-monospace)";
-                patText.style.fontSize = "13px";
+                patText.setCssStyles({
+                    flex: "1",
+                    fontFamily: "var(--font-monospace)",
+                    fontSize: "13px",
+                });
 
                 // 删除按钮
                 const delBtn = row.createEl("button", { text: "删除" });
-                delBtn.style.padding = "2px 8px";
+                delBtn.setCssStyles({ padding: "2px 8px" });
                 delBtn.onclick = () => {
                     this.filterConfig.userRules.splice(i, 1);
                     this.render();
@@ -368,14 +388,16 @@ export class ExternalFilterModal extends Modal {
 
         // 4. 添加新规则输入栏
         const addCard = this.contentEl.createDiv({ cls: "smartmd-card" });
-        addCard.style.marginTop = "12px";
+        addCard.setCssStyles({ marginTop: "12px" });
         addCard.createEl("h4", { text: "添加规则", attr: { style: "margin: 0 0 8px;" } });
 
         const addRow = addCard.createDiv();
-        addRow.style.display = "grid";
-        addRow.style.gridTemplateColumns = "1fr auto auto auto";
-        addRow.style.gap = "8px";
-        addRow.style.alignItems = "center";
+        addRow.setCssStyles({
+            display: "grid",
+            gridTemplateColumns: "1fr auto auto auto",
+            gap: "8px",
+            alignItems: "center",
+        });
 
         const patternInput = addRow.createEl("input", { type: "text" });
         patternInput.placeholder = "例如 archive/** 或 *draft* 或 README.md";
@@ -418,9 +440,11 @@ export class ExternalFilterModal extends Modal {
 
         // 5. 提示说明
         const tips = this.contentEl.createEl("div");
-        tips.style.marginTop = "10px";
-        tips.style.fontSize = "12px";
-        tips.style.color = "var(--text-muted)";
+        tips.setCssStyles({
+            marginTop: "10px",
+            fontSize: "12px",
+            color: "var(--text-muted)",
+        });
         tips.createEl("p", {
             text: "💡 提示：支持零门槛通配符（* 匹配任意单层字符，** 匹配多级目录，? 匹配单个字符）与精确完全匹配。修改规则会将已同步的受排除知识库镜像移至回收站，不会删除外部源。",
             attr: { style: "margin: 4px 0;" },
@@ -949,7 +973,7 @@ export class ExternalSyncService {
                 const input = document.createElement("input");
                 input.type = "file";
                 (input as any).webkitdirectory = true;
-                input.style.display = "none";
+                input.setCssStyles({ display: "none" });
                 document.body.appendChild(input);
                 input.onchange = () => {
                     const files = input.files;

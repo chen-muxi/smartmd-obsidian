@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, requestUrl } from "obsidian";
+import { App, Notice, Platform, Plugin, requestUrl } from "obsidian";
 import { MicrosoftDeviceCodeSession, MicrosoftDeviceToken } from "./microsoft-device-flow";
 
 const MICROSOFT_CLIENT_ID = "0ad3b293-4c9e-4d7a-94a3-7043c8bb6248";
@@ -9,6 +9,15 @@ import { DEFAULT_SETTINGS, SharedSmartMDState, SmartMDSettings, mergeSettings, n
 const MICROSOFT_SECRET = "obsidian-suite-microsoft-token";
 const AI_SECRET = "obsidian-suite-ai-key";
 const AI_HTTP_SECRET = "obsidian-suite-ai-http-key";
+
+export function getDevicePlatformName(): string {
+    if (Platform.isWin) return "Windows";
+    if (Platform.isMacOS) return "macOS";
+    if (Platform.isLinux) return "Linux";
+    if (Platform.isIosApp) return "iOS";
+    if (Platform.isAndroidApp) return "Android";
+    return "Obsidian device";
+}
 
 function httpModelOrigin(address: string): string | null {
     if (!/^http:\/\//i.test(address.trim())) return null;
@@ -96,8 +105,7 @@ export class SmartMDStore {
             this.settings.local.oneDrive.deviceId = newId("device");
         }
         if (!this.settings.local.oneDrive.deviceName) {
-            const platform = navigator.platform || "Obsidian device";
-            this.settings.local.oneDrive.deviceName = platform.slice(0, 60);
+            this.settings.local.oneDrive.deviceName = getDevicePlatformName();
         }
         // An Obsidian installation may open multiple Vaults on the SAME PC.
         // Scope this local-only approval to a verified Windows Vault root;

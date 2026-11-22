@@ -7,7 +7,7 @@ const markedLicense = readFileSync(new URL("./licenses/marked.txt", import.meta.
 
 esbuild.build({
     banner: {
-        js: `/* SmartMD 1.0.20 */\n/*! Marked license\n${markedLicense}\n*/`,
+        js: `/* SmartMD 1.0.21 */\n/*! Marked license\n${markedLicense}\n*/`,
     },
     entryPoints: ['main.ts'],
     bundle: true,
