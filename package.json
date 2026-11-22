@@ -1,0 +1,22 @@
+{
+    "name": "smartmd",
+    "version": "1.0.20",
+    "description": "SmartMD plugin for publishing, safe sync, and reviewed AI editing",
+    "main": "main.js",
+    "scripts": {
+        "dev": "node esbuild.config.mjs",
+        "build": "node esbuild.config.mjs production"
+    },
+    "author": "Antigravity",
+    "license": "MIT",
+    "devDependencies": {
+        "@types/node": "^16.18.126",
+        "esbuild": "0.17.3",
+        "obsidian": "latest",
+        "typescript": "4.9.5"
+    },
+    "dependencies": {
+        "marked": "18.2.0",
+        "tslib": "^2.8.1"
+    }
+}
