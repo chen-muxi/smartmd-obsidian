@@ -20,7 +20,7 @@ import {
 } from "./types";
 import { OperationAuthority, RunTicket } from "./operation-authority";
 import { inspectAndroidReceiverCandidateInventory, inspectReceiverCandidateInventory } from "./onedrive-receiver-audit";
-import { placeAndroidStagedFile, replaceAndroidMarkdownIfUnchanged, trashAndroidFile } from "./onedrive-android-write";
+import { placeAndroidStagedFile, replaceAndroidBinaryIfUnchanged, replaceAndroidMarkdownIfUnchanged, trashAndroidFile } from "./onedrive-android-write";
 import { redactOneDriveText, safeOneDriveError } from "./onedrive-error-redaction";
 
 
@@ -423,6 +423,7 @@ type ResumedEntry = {
     remoteId: string; remoteEtag: string; remoteSize: number; remoteHash: string;
     baselineHash: string; baselineRemoteId: string; baselineRemoteEtag: string;
     protectedCopyPath?: string; protectedCopyEtag?: string; protectedCopyHash?: string;
+    requiresSeparateVerification?: boolean;
 };
 type ResumedSnapshot = {
     accountId: string; vaultId: string; deviceId: string;
@@ -464,14 +465,14 @@ export class OneDriveSyncService {
     // Ephemeral first-connection choice: never write identity settings until final approval.
     private pendingFirstChoice: PendingFirstChoice | null = null;
     private previewVaultId: string | null = null;
-    private firstCommitStaged: { ticket: FirstCommitTicket; proposal: FirstCommitProposal } | null = null;
+    private firstCommitStaged: { ticket: FirstCommitTicket; proposal: FirstCommitProposal; generation: number } | null = null;
     private firstCommitConsents = new WeakSet<object>();
     private firstCommitInFlight: Promise<FirstCommitDecision> | null = null;
     private activeRegistrationTicket: string | null = null;
     private approvedFirstCommitTicketId: string | null = null;
     private activeFirstSyncTicket: string | null = null;
     private activeFirstReceiverResume = false;
-    private firstFilePrepared: { ticket: FirstCommitTicket; journal: FirstFileJournal } | null = null;
+    private firstFilePrepared: { ticket: FirstCommitTicket; journal: FirstFileJournal; generation: number } | null = null;
     private firstFileConsents = new WeakSet<object>();
     private firstFileJob: Promise<FileCopyDecision> | null = null;
     private remoteDeltaCache: { vaultId: string; rootId: string; deltaLink: string; nodes: Record<string, any> } | null = null;
@@ -484,7 +485,7 @@ export class OneDriveSyncService {
     private conflictReviewTickets = new WeakMap<object, { path: string; snapshot: string; expiresAt: number }>();
     private conflictReviewInFlight = false;
     private resumedReviewTickets = new WeakMap<object, {
-        snapshot: string; expiresAt: number;
+        snapshot: string; expiresAt: number; targetPath?: string;
     }>();
     private dailySyncReviewTickets = new WeakMap<object, {
         snapshot: string; expiresAt: number; generation: number;
@@ -587,7 +588,7 @@ export class OneDriveSyncService {
         return (this.store as any).settings.local.oneDrive;
     }
 
-    private async captureResumedOneDriveReview(): Promise<ResumedSnapshot> {
+    private async captureResumedOneDriveReview(targetPath?: string): Promise<ResumedSnapshot> {
         if (this.uploadLedgerReconciliationInFlight || this.uploadLedgerSettlementInFlight ||
             this.unknownSettlementInFlight) {
             throw new Error("旧上传日志正在持久结算，完成前不得预览或批准新上传");
@@ -660,13 +661,12 @@ export class OneDriveSyncService {
             ...Object.keys(uploadLedger),
         ])].sort();
         const entries: ResumedEntry[] = [];
-        // A cold restart must not strand already-synced or newly-created large
-        // files below the configured 250 MiB limit. Hash local bytes before
-        // reapproval; keep the independent 16 MB remote-read budget for changed
-        // remote versions and preserve HOLD for any unverified remote content.
+        // After a cold restart, verify changed remote bytes before approval.
+        // Android can verify one configured file in a separate preview when
+        // the combined size of changed files exhausts the full preview budget.
         const permittedBytes = this.maxBytes();
-        let inspectionBudget = 16_000_000;
-        for (const path of paths) {
+        let inspectionBudget = Platform.isAndroidApp ? permittedBytes : 16_000_000;
+        for (const path of targetPath ? paths.filter(item => item === targetPath) : paths) {
             if (!path || path.startsWith("/") || path.includes("\\") ||
                 path.split("/").some((part) => !part || part === "." || part === "..")) {
                 throw new Error("同步文件相对路径不可信，停止批准新范围");
@@ -755,11 +755,13 @@ export class OneDriveSyncService {
                 }
             }
             let remoteHash = "";
+            let requiresSeparateVerification: boolean | undefined;
             if ((action === "DOWNLOAD" || action === "DELETE_CLOUD"
                 || action === "CONFLICT_STAGE_KEEP_BOTH"
                 || (action === "UPLOAD" && remote)) && remote) {
                 if (remote.size > inspectionBudget) {
                     action = "HOLD"; reason = "只读下载校验预算不足，禁止未验版本写入";
+                    if (Platform.isAndroidApp && !targetPath) requiresSeparateVerification = true;
                 } else {
                     const data = await this.remoteBytes(remote);
                     if (data.byteLength !== remote.size) {
@@ -776,7 +778,7 @@ export class OneDriveSyncService {
                 remoteHash, baselineHash: old?.localHash || "",
                 baselineRemoteId: old?.remoteId || "",
                 baselineRemoteEtag: old?.remoteEtag || "",
-                protectedCopyPath, protectedCopyEtag, protectedCopyHash,
+                protectedCopyPath, protectedCopyEtag, protectedCopyHash, requiresSeparateVerification,
             });
         }
         if (scope !== JSON.stringify([
@@ -807,16 +809,21 @@ export class OneDriveSyncService {
         };
     }
 
-    async prepareResumedOneDriveReview(): Promise<ResumedOneDriveReview> {
+    async prepareResumedOneDriveReview(targetPath?: string): Promise<ResumedOneDriveReview> {
+        const generation = this.resumedApprovalGeneration;
+        if (targetPath && !Platform.isAndroidApp) throw new Error("当前平台不支持指定单条重新核验");
         await this.verifyCompletedIdenticalRegistration();
         if (this.dailySyncApprovalInFlight || this.resumedInFlight || this.uploadLedgerReconciliationInFlight ||
             this.uploadLedgerSettlementInFlight || this.unknownSettlementInFlight) {
             throw new Error("上一轮操作仍在执行或上传日志正在持久结算，禁止签发新预览");
         }
-        const snapshot = await this.captureResumedOneDriveReview();
+        const snapshot = await this.captureResumedOneDriveReview(targetPath);
+        if (generation !== this.resumedApprovalGeneration || (targetPath && snapshot.entries.length !== 1)) {
+            throw new Error("重新核验的执行范围已变化，请重新打开预览");
+        }
         const ticket = Object.freeze({});
         const expiresAt = Date.now() + 5 * 60_000;
-        this.resumedReviewTickets.set(ticket, { snapshot: JSON.stringify(snapshot), expiresAt });
+        this.resumedReviewTickets.set(ticket, { snapshot: JSON.stringify(snapshot), expiresAt, targetPath });
         return {
             ticket, accountId: snapshot.accountId, vaultId: snapshot.vaultId,
             localVaultId: snapshot.localVaultId, cloudVaultId: snapshot.cloudVaultId,
@@ -848,7 +855,8 @@ export class OneDriveSyncService {
             (firstFile && !trustedCompletedFirstFile)) {
             throw new Error("仍有冲突、删除、未知上传或未结算首次提交记录，须逐项结案后才能恢复日常同步");
         }
-        const active = snapshot.entries.filter((entry) => !this.isIgnored(entry.path));
+        const active = snapshot.entries.filter((entry) => !this.isIgnored(entry.path) &&
+            (!Platform.isAndroidApp || Math.max(entry.localSize, entry.remoteSize) <= this.maxBytes()));
         const blocked = active.find((entry) =>
             !["UNCHANGED", "UPLOAD", "DOWNLOAD"].includes(entry.action));
         if (blocked) {
@@ -985,7 +993,7 @@ export class OneDriveSyncService {
             reason: string; remoteId: string; remoteEtag: string;
             stagingId: string; stagingEtag: string; sourceSha256: string;
         }> = [];
-        let remainingBytes = 16_000_000;
+        let remainingBytes = Platform.isAndroidApp ? 3 * this.maxBytes() : 16_000_000;
         for (const path of keys.sort()) {
             const item: any = ledger[path];
             const result = {
@@ -1014,7 +1022,7 @@ export class OneDriveSyncService {
                 !item.stageId || !item.stageEtag ||
                 !/^[0-9a-f]{64}$/.test(sourceSha) ||
                 !Number.isSafeInteger(bytes) || bytes < 0 ||
-                bytes > Math.min(4_000_000, this.maxBytes()) ||
+                bytes > this.maxResumedFileBytes() ||
                 3 * bytes > remainingBytes) continue;
             const local = this.app.vault.getAbstractFileByPath(path);
             const mother = remotes.filter((remote) => remote.path === path);
@@ -1037,11 +1045,11 @@ export class OneDriveSyncService {
                 const localBytes = await this.app.vault.readBinary(local);
                 if (localBytes.byteLength !== bytes ||
                     await this.sha256Bytes(localBytes) !== sourceSha) continue;
-                const stagedBytes = await this.remoteBytes(staging[0]);
-                const targetBytes = await this.remoteBytes(mother[0]);
-                if (stagedBytes.byteLength !== bytes || targetBytes.byteLength !== bytes ||
-                    await this.sha256Bytes(stagedBytes) !== sourceSha ||
-                    await this.sha256Bytes(targetBytes) !== sourceSha) continue;
+                const verify = async (file: RemoteFile) => {
+                    const data = await this.remoteBytes(file);
+                    return data.byteLength === bytes && await this.sha256Bytes(data) === sourceSha;
+                };
+                if (!await verify(staging[0]) || !await verify(mother[0])) continue;
                 result.status = "VERIFIED_BUT_LOCKED";
                 result.reason = "原操作暂存和目标正文均逐字节核实；没有删除暂存、重试上传或解除历史锁的授权";
                 result.sourceSha256 = sourceSha;
@@ -1273,7 +1281,7 @@ export class OneDriveSyncService {
         const length = Number(record.sourceBytes);
         if (record.stagingPath !== expectedStage ||
             !Number.isSafeInteger(length) || length < 0 ||
-            length > Math.min(4_000_000, this.maxBytes())) {
+            length > this.maxResumedFileBytes()) {
             throw new Error("原操作暂存路径或源字节大小不可信，拒绝恢复");
         }
         const local = this.app.vault.getAbstractFileByPath(path);
@@ -1481,7 +1489,8 @@ export class OneDriveSyncService {
         // Every click, cancel and failure consumes this ticket. Never persist it.
         if (ticket && typeof ticket === "object") this.resumedReviewTickets.delete(ticket);
         if (!approved) return false;
-        if (!issued || issued.expiresAt <= Date.now() || this.resumedInFlight ||
+        if (!issued || (issued.targetPath && issued.targetPath !== targetPath) ||
+            issued.expiresAt <= Date.now() || this.resumedInFlight ||
             this.uploadLedgerReconciliationInFlight || this.uploadLedgerSettlementInFlight ||
             this.unknownSettlementInFlight || this.running || this.preparing || this.operationJob) {
             throw new Error("重启后的独立预览票据不存在、过期或正在执行，必须重新只读检查");
@@ -1490,7 +1499,7 @@ export class OneDriveSyncService {
         const startedGeneration = this.resumedApprovalGeneration;
         let operation: RunTicket | null = null;
         try {
-            const snapshot = await this.captureResumedOneDriveReview();
+            const snapshot = await this.captureResumedOneDriveReview(issued.targetPath);
             if (this.resumedApprovalGeneration !== startedGeneration ||
                 JSON.stringify(snapshot) !== issued.snapshot ||
                 Date.now() >= issued.expiresAt) {
@@ -1504,7 +1513,7 @@ export class OneDriveSyncService {
                 throw new Error("本条不是已完成只读审核的精确上传/下载范围，不允许自动选赢家或删除");
             }
             const s = this.settings();
-            const permittedBytes = Math.min(4_000_000, this.maxBytes());
+            const permittedBytes = this.maxResumedFileBytes();
             if (chosen.localSize > permittedBytes || chosen.remoteSize > permittedBytes) {
                 throw new Error("本次文件超过当前生效大小上限，不能沿用旧确认");
             }
@@ -1633,11 +1642,13 @@ export class OneDriveSyncService {
                 const oldLocal = localFile instanceof TFile
                     ? { path: targetPath, file: localFile,
                         size: localFile.stat.size, mtime: localFile.stat.mtime } : undefined;
-                if (oldLocal && (oldLocal.mtime !== chosen.localMtime ||
-                    await this.sha256Bytes(await this.app.vault.readBinary(oldLocal.file)) !== chosen.localHash)) {
+                if (Boolean(oldLocal) !== Boolean(chosen.localHash) ||
+                    (oldLocal && (oldLocal.mtime !== chosen.localMtime ||
+                        await this.sha256Bytes(await this.app.vault.readBinary(oldLocal.file)) !== chosen.localHash))) {
                     throw new Error("下载前本机目标改写，拒绝覆盖");
                 }
-                await this.download(operation, remoteBefore, targetPath, oldLocal);
+                await this.download(operation, remoteBefore, targetPath, oldLocal, false,
+                    chosen.localHash || undefined, chosen.remoteHash);
                 this.assertCurrent(operation);
                 const current = this.app.vault.getAbstractFileByPath(targetPath);
                 if (!(current instanceof TFile) ||
@@ -1760,8 +1771,7 @@ export class OneDriveSyncService {
         const remoteOriginal = await this.remoteBytes(source);
         const remoteCopy = await this.remoteBytes(counterpart);
         const needsLocalUpdate = !sameBytes(originalBytes, remoteOriginal);
-        const canFinishAndroid = Platform.isAndroidApp && original.extension.toLowerCase() === "md" &&
-            sameBytes(originalBytes, preservedBytes);
+        const canFinishAndroid = Platform.isAndroidApp && sameBytes(originalBytes, preservedBytes);
         if ((!canFinishAndroid && needsLocalUpdate) || !sameBytes(preservedBytes, remoteCopy)) {
             throw new Error("冲突两端的物理字节与已保存副本不一致，拒绝解除锁");
         }
@@ -3072,6 +3082,9 @@ export class OneDriveSyncService {
             if (!accessApproved) return false;
             this.vaultRegistryCache = null;
             this.registryReadIsTrusted = false;
+            if (settings.firstFileJournal && !settings.firstCommitJournal?.priorBindingArchive) {
+                return await this.resumeFirstFileCopy(assertFirstGrantCurrent, initialGeneration);
+            }
             if (!(await this.prepareVaultIdentity())) return false;
             const choice = this.pendingFirstChoice;
             if (!choice) return false;
@@ -3178,7 +3191,7 @@ export class OneDriveSyncService {
                 new SyncPreviewModal(
                     this.app, preview,
                     async (reportProgress) => {
-                        if (Platform.isAndroidApp) assertFirstGrantCurrent();
+                        assertFirstGrantCurrent();
                         await this.assertFirstConnectionSnapshotFresh(prepared.snapshot);
                         if (choice.mode === "existing") {
                             await this.assertFirstReceiverIdentity(choice, initialAccount);
@@ -3198,6 +3211,9 @@ export class OneDriveSyncService {
                             throw new Error("拟新建云端目录已有内容，禁止按全新副本提交；请重新检查。");
                         }
                         if (choice.mode === "new") {
+                            if (this.skippedLocalPaths().size) {
+                                throw new Error("存在超过上限的本地文件，禁止登记不完整的独立云库");
+                            }
                             // Four stage registration -> version-pinned upload ->
                             // per-byte verification -> durable binding. Never use
                             // the generic sync(true) shortcut before registry.
@@ -3219,15 +3235,18 @@ export class OneDriveSyncService {
                                 uploads: local.map((entry) => entry.path).sort(),
                                 downloads: [], conflicts: [], unknown: [],
                                 expiresAt: Date.now() + 5 * 60_000,
-                            });
+                            }, initialGeneration);
+                            assertFirstGrantCurrent();
                             const consent = this.approveFirstConnection(
                                 ticket.ticketId, ticket.digest, true);
                             const registered = await this.commitFirstConnection(ticket, consent);
                             if (registered.status !== "REGISTERED") {
                                 throw new Error(registered.reason || "云端独立库登记尚未确认");
                             }
+                            assertFirstGrantCurrent();
                             reportProgress("云端独立库已登记，正在校验每篇上传计划");
-                            const filesTicket = await this.prepareFirstFileTransfer();
+                            const filesTicket = await this.prepareFirstFileTransfer(prepared.snapshot.localVersions, initialGeneration);
+                            assertFirstGrantCurrent();
                             const filesConsent = this.approveFirstFileTransfer(
                                 filesTicket.ticketId, filesTicket.digest, true);
                             const copied = await this.executeFirstFileTransfer(
@@ -3235,20 +3254,11 @@ export class OneDriveSyncService {
                             if (copied.status !== "FILES_COPIED") {
                                 throw new Error(copied.reason || "文件事务需要只读对账");
                             }
+                            assertFirstGrantCurrent();
                             // saveVerifiedFirstFileBinding has already
                             // verified the exact copied files and stored the
                             // local/cloud distinct identity pair.
-                            settings.vaultId = choice.id;
-                            settings.confirmationVaultId = choice.id;
-                            settings.confirmationAccountId = initialAccount;
-                            settings.vaultName = choice.name;
-                            settings.confirmed = true;
-                            settings.runAllowed = true;
-                            settings.firstSyncCompleted = true;
-                            settings.enabled = false;
-                            settings.status = "ready";
-                            settings.lastSuccessAt = Date.now();
-                            await (this.store as any).save();
+                            await this.completeFirstFileCopy(choice.id, choice.name, initialAccount, assertFirstGrantCurrent);
                             return true;
                         }
                         if (choice.mode !== "existing" ||
@@ -4282,12 +4292,16 @@ export class OneDriveSyncService {
         return Math.min(250, Math.max(1, Number(this.settings().maxFileSizeMb || 250))) * 1024 * 1024;
     }
 
+    private maxResumedFileBytes(): number {
+        return Platform.isAndroidApp ? this.maxBytes() : Math.min(4_000_000, this.maxBytes());
+    }
+
     private isIgnored(path: string): boolean {
         // Exported recovery notes and locally staged download-conflict copies
         // are safety artifacts, not newly authored notes. Never send them as
         // ordinary uploads merely because the user resumes daily sync.
         if (path.startsWith("OneDrive恢复的笔记/") ||
-            /\.conflict-OneDrive-\d{4}-\d{2}-\d{2}T[\d-]+Z\.md$/.test(path)) {
+            /\.conflict-OneDrive-\d{4}-\d{2}-\d{2}T[\d-]+Z(?:\.[^/]+)?$/.test(path)) {
             return true;
         }
         return (this.settings().ignorePatterns || []).map(ignoreMatcher).some((pattern: RegExp) => pattern.test(path));
@@ -4835,7 +4849,9 @@ export class OneDriveSyncService {
         return contentHash(JSON.stringify((await this.captureFirstConnectionSnapshot()).snapshot));
     }
 
-    private async stageFirstConnectionCommit(input: FirstCommitProposal): Promise<FirstCommitTicket> {
+    private async stageFirstConnectionCommit(
+        input: FirstCommitProposal, generation = this.resumedApprovalGeneration,
+    ): Promise<FirstCommitTicket> {
         const settings = this.settings();
         const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
         const priorBindingArchive = await this.captureIndependentCopyArchive(input?.cloudVaultId || "");
@@ -4893,7 +4909,8 @@ export class OneDriveSyncService {
             digest: await contentHash(JSON.stringify(proposal)),
             expiresAt: proposal.expiresAt,
         });
-        this.firstCommitStaged = { ticket, proposal };
+        if (generation !== this.resumedApprovalGeneration) throw new Error("首次注册审批已撤销");
+        this.firstCommitStaged = { ticket, proposal, generation };
         return ticket;
     }
 
@@ -4901,6 +4918,7 @@ export class OneDriveSyncService {
     private approveFirstConnection(ticketId: string, digest: string, confirmed: boolean): object {
         const staged = this.firstCommitStaged;
         if (!confirmed || !staged || staged.ticket.ticketId !== ticketId
+            || staged.generation !== this.resumedApprovalGeneration
             || staged.ticket.digest !== digest || Date.now() >= staged.ticket.expiresAt) {
             throw new Error("未取得对应预览的最终人工确认，不得授权首次提交。");
         }
@@ -4915,6 +4933,7 @@ export class OneDriveSyncService {
         const blocked = (reason: string): FirstCommitDecision => ({ status: "BLOCKED", reason });
         if (!ticket || !consent || typeof consent !== "object"
             || !this.firstCommitConsents.has(consent) || !staged
+            || staged.generation !== this.resumedApprovalGeneration
             || ticket.ticketId !== staged.ticket.ticketId
             || ticket.digest !== staged.ticket.digest || ticket.expiresAt !== staged.ticket.expiresAt
             || Date.now() >= ticket.expiresAt || settings.firstSyncCompleted
@@ -4966,7 +4985,8 @@ export class OneDriveSyncService {
             }
             const registryMeta = await this.readRemoteFileMetadata("vaults/registry.json", true);
             const registry = await this.readSharedState("vaults/registry.json");
-            if (registryMeta?.etag !== proposal.registryEtag
+            if (this.firstCommitStaged?.generation !== this.resumedApprovalGeneration ||
+                registryMeta?.etag !== proposal.registryEtag
                 || JSON.stringify(registry?.vaults) !== JSON.stringify(proposal.registryVaults)) {
                 return blocked("远端注册表 ETag 或身份发生变化。");
             }
@@ -5015,6 +5035,9 @@ export class OneDriveSyncService {
         this.activeRegistrationTicket = ticket.ticketId;
         try {
             this.assertFirstCommitIdentity(proposal);
+            if (this.firstCommitStaged?.generation !== this.resumedApprovalGeneration) {
+                throw new Error("首次注册审批已撤销");
+            }
             await this.registerVault(
                 { id: proposal.cloudVaultId, name: proposal.cloudVaultName, updatedAt: Date.now(), registrationOpId: ticket.ticketId },
                 { etag: proposal.registryEtag, vaults: proposal.registryVaults },
@@ -5115,11 +5138,12 @@ export class OneDriveSyncService {
         if (this.skippedLocalPaths().size) {
             throw new Error("存在未批准的大文件跳过项，不能宣称独立云端副本完整。");
         }
+        const archivedBinding = Boolean(this.settings().firstCommitJournal?.priorBindingArchive);
         for (const item of local) {
             if (!item.path || item.path.startsWith("/") || item.path.includes("\\")
                 || item.path !== normalizePath(item.path)
                 || item.path.split("/").some((part) => !part || part === "." || part === "..")
-                || item.size >= 4_000_000) {
+                || (archivedBinding && item.size >= 4_000_000)) {
                 throw new Error("文件路径或大小尚不支持条件原子提交，已停止首次文件传输。");
             }
             const data = await this.app.vault.readBinary(item.file);
@@ -5216,7 +5240,7 @@ export class OneDriveSyncService {
     }
 
     // This stages only a NEW, empty, registered cloud copy. It never writes.
-    private async prepareFirstFileTransfer(): Promise<FirstCommitTicket> {
+    private async prepareFirstFileTransfer(approvedVersions: string[], generation: number): Promise<FirstCommitTicket> {
         const settings = this.settings();
         const registration = settings.firstCommitJournal as FirstCommitJournal | undefined;
         if (!registration || registration.stage !== "REGISTERED" || settings.firstFileJournal
@@ -5239,6 +5263,12 @@ export class OneDriveSyncService {
             throw new Error("新建云端目标已存在文件或内容冲突，禁止作为空副本上传。");
         }
         journal.files = await this.currentFirstFileEntries();
+        const currentVersions = journal.files
+            .map(file => JSON.stringify([file.path, file.size, file.mtime, file.sha256])).sort();
+        if (generation !== this.resumedApprovalGeneration ||
+            JSON.stringify(currentVersions) !== JSON.stringify(approvedVersions)) {
+            throw new Error("注册后本机预览版本或许可发生变化，禁止发出文件上传");
+        }
         journal.ruleDigest = await contentHash(JSON.stringify([this.maxBytes(), settings.ignorePatterns || []]));
         const ticket: FirstCommitTicket = Object.freeze({
             ticketId: typeof crypto.randomUUID === "function" ? crypto.randomUUID()
@@ -5247,13 +5277,14 @@ export class OneDriveSyncService {
         });
         journal.ticketId = ticket.ticketId;
         journal.digest = ticket.digest;
-        this.firstFilePrepared = { ticket, journal };
+        this.firstFilePrepared = { ticket, journal, generation };
         return ticket;
     }
 
     private approveFirstFileTransfer(ticketId: string, digest: string, confirmed: boolean): object {
         const staged = this.firstFilePrepared;
         if (!confirmed || !staged || staged.ticket.ticketId !== ticketId || staged.ticket.digest !== digest
+            || staged.generation !== this.resumedApprovalGeneration
             || Date.now() >= staged.ticket.expiresAt || this.firstFileJob) {
             throw new Error("尚未获得与首次文件预览一致的最终人工授权。");
         }
@@ -5269,6 +5300,7 @@ export class OneDriveSyncService {
         const staged = this.firstFilePrepared;
         if (!ticket || !consent || typeof consent !== "object" || !this.firstFileConsents.has(consent)
             || !staged || !staged.ticket
+            || staged.generation !== this.resumedApprovalGeneration
             || ticket.ticketId !== staged.ticket.ticketId || ticket.digest !== staged.ticket.digest
             || ticket.expiresAt !== staged.ticket.expiresAt || Date.now() >= ticket.expiresAt
             || this.settings().firstFileJournal || this.firstFileJob) {
@@ -5276,7 +5308,7 @@ export class OneDriveSyncService {
         }
         // Consume the capability before the first await. Duplicate clicks cannot enter.
         this.firstFileConsents.delete(consent);
-        const work = this.performApprovedFirstFileTransfer(staged.journal, ticket);
+        const work = this.performApprovedFirstFileTransfer(staged.journal, ticket, staged.generation);
         this.firstFileJob = work;
         try {
             return await work;
@@ -5287,27 +5319,31 @@ export class OneDriveSyncService {
     }
 
     private async performApprovedFirstFileTransfer(
-        journal: FirstFileJournal, ticket: FirstCommitTicket,
+        journal: FirstFileJournal, ticket: FirstCommitTicket, generation: number,
     ): Promise<FileCopyDecision> {
         const blocked = (reason: string): FileCopyDecision => ({ status: "BLOCKED", reason });
         try {
             if (Date.now() >= ticket.expiresAt) return blocked("最终批准已过期，必须重新预览。");
             await this.verifyFirstFileContent(journal, false);
+            if (generation !== this.resumedApprovalGeneration) return blocked("首次文件上传许可已撤销");
         } catch {
             return blocked("提交前本地/云端版本或账号发生变化，未执行写入。");
         }
         const settings = this.settings();
         // The plan is durable before any remote folder creation or content PUT.
+        const previous = settings.firstFileJournal;
         settings.firstFileJournal = JSON.parse(JSON.stringify(journal)) as FirstFileJournal;
         const durable = settings.firstFileJournal as FirstFileJournal;
         try {
             await (this.store as any).save();
         } catch {
-            delete settings.firstFileJournal;
+            if (previous) settings.firstFileJournal = previous;
+            else delete settings.firstFileJournal;
             return blocked("本地文件事务日志无法持久保存，云端保持不变。");
         }
         try {
             for (const file of durable.files) {
+                if (Object.prototype.hasOwnProperty.call(durable.completed, file.path)) continue;
                 // Read and validate current state before each individual write.
                 // Recheck all approved identities, metadata and local hashes before every write.
                 // Download remote bytes once in final verification to avoid N² content fetches.
@@ -5328,13 +5364,13 @@ export class OneDriveSyncService {
                 this.previewVaultId = durable.cloudVaultId;
                 let result: any;
                 try {
-                    // Null target forces If-None-Match: * for a new file.
+                    // A null destination selects an exclusive upload session for a new file.
                     const archive = (settings.firstCommitJournal as FirstCommitJournal | undefined)?.priorBindingArchive;
-                    const generation = this.resumedApprovalGeneration;
-                    const guard = archive ? () => {
+                    const guard = () => {
                         if (generation !== this.resumedApprovalGeneration || settings.firstFileJournal !== durable ||
                             durable.stage !== "TRANSFERRING") throw new Error("独立副本文件操作已暂停或变化");
                         this.assertFirstFileIdentity(durable);
+                        if (!archive) return;
                         const fs = require("fs") as typeof import("fs");
                         const path = require("path").win32 as typeof import("path").win32;
                         const target = path.resolve(archive.physicalRoot, file.path);
@@ -5348,7 +5384,7 @@ export class OneDriveSyncService {
                                 (require("node:crypto") as typeof import("node:crypto")).createHash("sha256").update(fs.readFileSync(fd)).digest("hex") !== file.sha256)
                                 throw new Error("取得凭据期间本机源字节变化");
                         } finally { fs.closeSync(fd); }
-                    } : undefined;
+                    };
                     result = await this.upload(file.path, bytes, false, null, undefined, undefined, guard);
                 } finally {
                     this.previewVaultId = before;
@@ -5356,11 +5392,14 @@ export class OneDriveSyncService {
                 if (!result?.id || !(result.eTag || result.etag)) {
                     throw new Error("云端上传结果缺少 ID 或 ETag，必须只读对账。");
                 }
-                durable.completed[file.path] = { id: String(result.id), etag: String(result.eTag || result.etag) };
+                Object.defineProperty(durable.completed, file.path, {
+                    value: { id: String(result.id), etag: String(result.eTag || result.etag) }, enumerable: true,
+                });
                 durable.updatedAt = Date.now();
                 await (this.store as any).save();
             }
             await this.verifyFirstFileContent(durable, true);
+            if (generation !== this.resumedApprovalGeneration) throw new Error("首次文件上传许可已撤销");
             await this.saveVerifiedFirstFileBinding(durable);
             return { status: "FILES_COPIED" };
         } catch {
@@ -5368,6 +5407,87 @@ export class OneDriveSyncService {
             durable.updatedAt = Date.now();
             try { await (this.store as any).save(); } catch {}
             return { status: "RECONCILE_REQUIRED", reason: "首次云端副本结果不明确，禁止盲目重试，需只读对账。" };
+        }
+    }
+
+    private async resumeFirstFileCopy(assertGrantCurrent: () => void, generation: number): Promise<boolean> {
+        const settings = this.settings();
+        const prior = settings.firstFileJournal as FirstFileJournal;
+        const registered = settings.firstCommitJournal as FirstCommitJournal;
+        if (!["TRANSFERRING", "RECONCILE_REQUIRED", "FILES_COPIED"].includes(prior.stage)) {
+            throw new Error("首次上传事务阶段不可信，保持暂停");
+        }
+        const inspect = async () => {
+            if (settings.firstFileJournal !== prior) throw new Error("原文件操作已变化");
+            const current = await this.currentFirstFileEntries();
+            const ruleDigest = await contentHash(JSON.stringify([this.maxBytes(), settings.ignorePatterns || []]));
+            if (JSON.stringify(current) !== JSON.stringify(prior.files) || ruleDigest !== prior.ruleDigest) {
+                throw new Error("首次上传后本机版本或同步范围已变化，原操作保持暂停");
+            }
+            await this.verifyFirstFileRegistration(prior);
+            const observed: FirstFileJournal["completed"] = {};
+            const remote = await this.readFirstCopyRemoteFiles(prior);
+            const approved = new Map(prior.files.map(file => [file.path, file]));
+            for (const item of [...remote].sort((a, b) => a.path.localeCompare(b.path))) {
+                const file = approved.get(item.path);
+                const previous = Object.prototype.hasOwnProperty.call(prior.completed, item.path) ? prior.completed[item.path] : null;
+                if (!file || item.size !== file.size || (previous && (previous.id !== item.id || previous.etag !== item.etag)) ||
+                    await this.firstFileHash(await this.remoteBytes(item)) !== file.sha256) {
+                    throw new Error("远端已有文件无法核实，保留两端并禁止重新上传");
+                }
+                Object.defineProperty(observed, item.path, { value: { id: item.id, etag: item.etag }, enumerable: true });
+            }
+            if (Object.keys(prior.completed).some(path => !Object.prototype.hasOwnProperty.call(observed, path))) {
+                throw new Error("已上传的云端文件丢失，首次上传保持暂停");
+            }
+            assertGrantCurrent();
+            return observed;
+        };
+        const observed = await inspect();
+        const missing = prior.files.map(file => file.path)
+            .filter(path => !Object.prototype.hasOwnProperty.call(observed, path));
+        const preview: SyncPreview = {
+            localCount: prior.files.length, remoteCount: Object.keys(observed).length,
+            uploadCount: missing.length, downloadCount: 0, possibleConflicts: 0, skippedCount: 0,
+            uploadPaths: missing, downloadPaths: [], samePaths: Object.keys(observed).sort(),
+            skippedPaths: [], conflictPaths: [], unknownPaths: [], unexpectedNewTarget: false,
+            identity: { accountId: prior.accountId, localVaultId: prior.localVaultId, cloudVaultId: prior.cloudVaultId },
+        };
+        const expiresAt = Date.now() + 5 * 60_000;
+        await new Promise<void>(resolve => new SyncPreviewModal(this.app, preview, async (progress) => {
+            const latest = await inspect();
+            if (Date.now() >= expiresAt || JSON.stringify(latest) !== JSON.stringify(observed)) {
+                throw new Error("首次上传预览已过期，或云端版本已变化");
+            }
+            if (prior.stage !== "FILES_COPIED") {
+                const journal: FirstFileJournal = { ...prior, completed: latest, stage: "TRANSFERRING" };
+                const ticket = { ticketId: journal.ticketId, digest: journal.digest, expiresAt };
+                progress("正在续传尚未提交的文件");
+                const result = await this.performApprovedFirstFileTransfer(journal, ticket, generation);
+                if (result.status !== "FILES_COPIED") throw new Error(result.reason || "首次上传仍需对账");
+            } else {
+                await this.verifyFirstFileContent(prior, true);
+            }
+            assertGrantCurrent();
+            await this.completeFirstFileCopy(prior.cloudVaultId, registered.cloudVaultName, prior.accountId, assertGrantCurrent);
+            return true;
+        }, resolve, true).open());
+        return settings.firstSyncCompleted === true;
+    }
+
+    private async completeFirstFileCopy(
+        cloudVaultId: string, name: string, accountId: string, assertGrantCurrent: () => void,
+    ): Promise<void> {
+        assertGrantCurrent();
+        const settings = this.settings();
+        const previous = { ...settings };
+        Object.assign(settings, { vaultId: cloudVaultId, confirmationVaultId: cloudVaultId,
+            confirmationAccountId: accountId, vaultName: name, confirmed: true, runAllowed: true,
+            firstSyncCompleted: true, enabled: false, status: "ready", lastSuccessAt: Date.now() });
+        try { await this.store.saveWithIdentityGuard(assertGrantCurrent); }
+        catch (error) {
+            if (this.settings() === settings) Object.assign(settings, previous, { runAllowed: false, enabled: false });
+            throw error;
         }
     }
 
@@ -5524,13 +5644,12 @@ export class OneDriveSyncService {
         const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
         if (!accountId || settings.firstSyncCompleted) throw new Error("首次连接账号或同步阶段已变化。");
         const local = this.localFiles();
-        const localVersions = await Promise.all(local.map(async (item) => {
+        const localVersions: string[] = [];
+        for (const item of local) {
             const data = await this.app.vault.readBinary(item.file);
-            const digest = await crypto.subtle.digest("SHA-256", data);
-            const hash = Array.from(new Uint8Array(digest))
-                .map((byte) => byte.toString(16).padStart(2, "0")).join("");
-            return JSON.stringify([item.path, item.size, item.mtime, hash]);
-        }));
+            if (data.byteLength !== item.size) throw new Error("预览期间本机文件版本发生变化");
+            localVersions.push(JSON.stringify([item.path, item.size, item.mtime, await this.sha256Bytes(data)]));
+        }
         const remote = await this.remoteFiles(true, true);
         for (const item of remote) {
             if (!item.id || !item.path || !item.etag) {
@@ -5673,6 +5792,7 @@ export class OneDriveSyncService {
             const ticketId = this.activeRegistrationTicket;
             const liveJournal = (this.settings() as any).firstCommitJournal as FirstCommitJournal | undefined;
             if (!ticketId || this.approvedFirstCommitTicketId !== ticketId ||
+                staged?.generation !== this.resumedApprovalGeneration ||
                 staged?.ticket.ticketId !== ticketId ||
                 liveJournal?.ticketId !== ticketId ||
                 liveJournal?.stage !== "REGISTERING" || !staged?.proposal) {
@@ -6573,9 +6693,13 @@ export class OneDriveSyncService {
                     throw new Error("备份后本地内容变化，不覆盖当前笔记");
                 }
                 try {
-                    if (Platform?.isAndroidApp) {
+                    if (Platform.isAndroidApp && current.extension.toLowerCase() === "md") {
                         await replaceAndroidMarkdownIfUnchanged(
                             this.app.vault, current, path, before, data, () => this.assertCurrent(operation),
+                        );
+                    } else if (Platform.isAndroidApp) {
+                        await replaceAndroidBinaryIfUnchanged(
+                            this.app.vault, current, path, stagingPath, before, data, () => this.assertCurrent(operation),
                         );
                     } else {
                         await this.app.vault.modifyBinary(current, data);

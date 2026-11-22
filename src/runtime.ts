@@ -1116,10 +1116,10 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 }
             };
             const reviewButton = section.createEl("button", { text: "重新只读核对本次文件范围" });
-            reviewButton.onclick = async () => {
+            const openFileReview = async (path?: string) => {
                 reviewButton.disabled = true;
                 try {
-                    const preview = await this.runtime.oneDrive.prepareResumedOneDriveReview();
+                    const preview = await this.runtime.oneDrive.prepareResumedOneDriveReview(path);
                     const modal = new Modal(this.runtime.app);
                     let chosen = false;
                     modal.onOpen = () => {
@@ -1146,6 +1146,12 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                                 row.createEl("p", { text: "受保护的另一份原稿：" + entry.protectedCopyPath +
                                     "；ETag：" + entry.protectedCopyEtag });
                                 row.createEl("p", { text: "保护副本 SHA-256：" + entry.protectedCopyHash });
+                            }
+                            if (entry.requiresSeparateVerification) {
+                                row.createEl("button", { text: "单独校验并预览此文件" }).onclick = () => {
+                                    modal.close();
+                                    void openFileReview(entry.path);
+                                };
                             }
                             const actionNames: Record<string, string> = {
                                 UPLOAD: "上传此文件",
@@ -1193,6 +1199,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                     reviewButton.disabled = false;
                 }
             };
+            reviewButton.onclick = () => void openFileReview();
         }
 
         // UNKNOWN uploads are not failed uploads that may be retried.
