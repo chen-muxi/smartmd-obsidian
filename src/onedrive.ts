@@ -3085,6 +3085,9 @@ export class OneDriveSyncService {
             if (settings.firstFileJournal && !settings.firstCommitJournal?.priorBindingArchive) {
                 return await this.resumeFirstFileCopy(assertFirstGrantCurrent, initialGeneration);
             }
+            if (settings.firstCommitJournal && !settings.firstCommitJournal.priorBindingArchive) {
+                return await this.resumeRegisteredFirstCopy(assertFirstGrantCurrent, initialGeneration);
+            }
             if (!(await this.prepareVaultIdentity())) return false;
             const choice = this.pendingFirstChoice;
             if (!choice) return false;
@@ -5118,7 +5121,8 @@ export class OneDriveSyncService {
         }
         const current = (this.store as any).settings.local;
         const settings = this.settings();
-        if (String(current.microsoftAccountId || "") !== proposal.accountId
+        if ((Platform.isAndroidApp && !this.store.installationProofIsValid()) ||
+            String(current.microsoftAccountId || "") !== proposal.accountId
             || settings.vaultId !== proposal.localVaultId
             || settings.deviceId !== proposal.deviceId
             || settings.firstSyncCompleted === true
@@ -5165,7 +5169,8 @@ export class OneDriveSyncService {
             if (registered.priorBindingArchive.newCloudVaultId !== journal.cloudVaultId) throw new Error("新独立副本目标与原批准不同");
             this.assertIndependentCopyScope(registered.priorBindingArchive);
         }
-        if (settings.firstSyncCompleted || !registered || registered.stage !== "REGISTERED"
+        if ((Platform.isAndroidApp && !this.store.installationProofIsValid()) ||
+            settings.firstSyncCompleted || !registered || registered.stage !== "REGISTERED"
             || registered.ticketId !== journal.registrationOpId
             || registered.identity.cloudVaultId !== journal.cloudVaultId
             || registered.identity.localVaultId !== journal.localVaultId
@@ -5473,6 +5478,42 @@ export class OneDriveSyncService {
             return true;
         }, resolve, true).open());
         return settings.firstSyncCompleted === true;
+    }
+
+    private async resumeRegisteredFirstCopy(assertGrantCurrent: () => void, generation: number): Promise<boolean> {
+        const settings = this.settings();
+        const existing = settings.firstCommitJournal as FirstCommitJournal;
+        await this.assertFirstCommitGraphAccount(existing.identity.accountId);
+        const registration = await this.reconcileFirstCommitJournal();
+        assertGrantCurrent();
+        if (registration.status !== "REGISTERED") {
+            throw new Error(registration.reason || "旧云端知识库登记尚未核实");
+        }
+        const current = await this.currentFirstFileEntries();
+        const approvedVersions = current.map(file => JSON.stringify([file.path, file.size, file.mtime, file.sha256])).sort();
+        const ticket = await this.prepareFirstFileTransfer(approvedVersions, generation);
+        const identity = existing.identity;
+        const preview: SyncPreview = {
+            localCount: current.length, remoteCount: 0, uploadCount: current.length,
+            downloadCount: 0, possibleConflicts: 0, skippedCount: 0,
+            uploadPaths: current.map(file => file.path), downloadPaths: [], samePaths: [],
+            skippedPaths: [], conflictPaths: [], unknownPaths: [], unexpectedNewTarget: false, identity,
+        };
+        try {
+            assertGrantCurrent();
+            await new Promise<void>(resolve => new SyncPreviewModal(this.app, preview, async () => {
+                assertGrantCurrent();
+                const consent = this.approveFirstFileTransfer(ticket.ticketId, ticket.digest, true);
+                const outcome = await this.executeFirstFileTransfer(ticket, consent);
+                if (outcome.status !== "FILES_COPIED") throw new Error(outcome.reason || "首次上传尚未完成");
+                await this.completeFirstFileCopy(identity.cloudVaultId, existing.cloudVaultName,
+                    identity.accountId, assertGrantCurrent);
+                return true;
+            }, resolve, true).open());
+            return settings.firstSyncCompleted === true;
+        } finally {
+            if (this.firstFilePrepared?.ticket === ticket) this.firstFilePrepared = null;
+        }
     }
 
     private async completeFirstFileCopy(
