@@ -1,3 +1,4 @@
+import { localize, localizeMessage } from "./localization";
 import { Notice, requestUrl } from "obsidian";
 import { SmartMDStore } from "./core";
 import { SMARTKEEP_PUBLISH_URL } from "./types";
@@ -175,7 +176,7 @@ export class SmartKeepAuth {
         if (error) {
             const failure = error instanceof Error ? error : new Error(String(error));
             reject?.(failure);
-            new Notice(`SmartKeep 登录失败：${failure.message}`, 8000);
+            new Notice(localize("SmartKeep 登录失败：{0}", localizeMessage(failure.message)), 8000);
         } else {
             resolve?.();
         }

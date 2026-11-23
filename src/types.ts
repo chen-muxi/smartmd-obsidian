@@ -320,6 +320,7 @@ export interface ExternalFolderBinding {
 }
 
 export interface LocalSmartMDState {
+    interfaceLanguage: "en" | "zh-CN";
     smartkeepAccountName: string;
     smartkeepAccountId: string;
     microsoftAccountName: string;
@@ -389,6 +390,7 @@ export const DEFAULT_SETTINGS: SmartMDSettings = {
         publishServerUrl: SMARTKEEP_PUBLISH_URL,
     },
     local: {
+        interfaceLanguage: "en",
         smartkeepAccountName: "",
         smartkeepAccountId: "",
         microsoftAccountName: "",
@@ -470,6 +472,7 @@ export function mergeSettings(raw: Partial<SmartMDSettings> | undefined): SmartM
         local: {
             ...DEFAULT_SETTINGS.local,
             ...local,
+            interfaceLanguage: local.interfaceLanguage === "zh-CN" ? "zh-CN" : "en",
             smartkeepAccountName: String((local as any).smartkeepAccountName || ""),
             smartkeepAccountId: String((local as any).smartkeepAccountId || ""),
             oneDrive: {

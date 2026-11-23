@@ -1,3 +1,4 @@
+import { localize, localizeMessage } from "./localization";
 import {
     App,
     Modal,
@@ -88,11 +89,11 @@ export class ConfirmModal extends Modal {
 
     onOpen(): void {
         this.modalEl.addClass("smartmd-modal-dialog");
-        this.titleEl.setText(this.titleText);
-        this.contentEl.createEl("p", { text: this.bodyText, cls: "smartkeep-modal-subdesc" });
+        this.titleEl.setText(localizeMessage(this.titleText));
+        this.contentEl.createEl("p", { text: localizeMessage(this.bodyText), cls: "smartkeep-modal-subdesc" });
         const actions = this.contentEl.createDiv({ cls: "smartmd-modal-actions" });
-        const cancel = actions.createEl("button", { text: "取消", attr: { type: "button" } });
-        const ok = actions.createEl("button", { text: this.confirmText, cls: "mod-cta", attr: { type: "button" } });
+        const cancel = actions.createEl("button", { text: localize("取消"), attr: { type: "button" } });
+        const ok = actions.createEl("button", { text: localizeMessage(this.confirmText), cls: "mod-cta", attr: { type: "button" } });
         cancel.onclick = () => { this.finishOnce(false); this.close(); };
         ok.onclick = () => { this.finishOnce(true); this.close(); };
     }
@@ -126,24 +127,24 @@ export class PublishSetupModal extends Modal {
 
     onOpen(): void {
         this.modalEl.addClass("smartmd-modal-dialog");
-        this.titleEl.setText("发布预览");
+        this.titleEl.setText(localize("发布预览"));
         this.contentEl.addClass("smartmd-publish-modal");
 
         const summary = this.contentEl.createDiv({ cls: "smartmd-publish-summary" });
         const summaryHeader = summary.createDiv({ cls: "smartmd-publish-summary-header" });
         const countEl = summaryHeader.createDiv({ cls: "smartmd-publish-count" });
-        countEl.createSpan({ text: "将发布 " });
+        countEl.createSpan({ text: localize("将发布 ") });
         countEl.createEl("strong", { text: `${this.preview.files.length}` });
-        countEl.createSpan({ text: " 篇 Markdown" });
-        summaryHeader.createDiv({ cls: "smartmd-publish-badge", text: "确认前无云端变化" });
+        countEl.createSpan({ text: localize(" 篇 Markdown") });
+        summaryHeader.createDiv({ cls: "smartmd-publish-badge", text: localize("确认前无云端变化") });
         summary.createEl("p", {
             cls: "smartmd-publish-summary-hint",
-            text: "发布后，此范围内 Markdown 的新增、修改、重命名和删除会持续同步到原空间；子目录包含在内。公开链接会自动保存至 SmartKeep，密码内容不会生成公开书签。",
+            text: localize("发布后，此范围内 Markdown 的新增、修改、重命名和删除会持续同步到原空间；子目录包含在内。公开链接会自动保存至 SmartKeep，密码内容不会生成公开书签。"),
         });
 
         if (this.preview.blocked.length) {
             const warning = this.contentEl.createDiv({ cls: "smartmd-warning" });
-            warning.createEl("strong", { text: `有 ${this.preview.blocked.length} 篇包含本地图片，必须先替换为公开图片链接：` });
+            warning.createEl("strong", { text: localize("有 {0} 篇包含本地图片，必须先替换为公开图片链接：", this.preview.blocked.length) });
             for (const item of this.preview.blocked.slice(0, 8)) {
                 warning.createDiv({ text: item.path, cls: "smartmd-warning-item" });
             }
@@ -151,16 +152,16 @@ export class PublishSetupModal extends Modal {
         if (this.preview.conflicts.length) {
             this.contentEl.createEl("p", {
                 cls: "smartmd-warning",
-                text: `发现 ${this.preview.conflicts.length} 个同路径内容。发布时只更新已确认范围，不会自动删除。`,
+                text: localize("发现 {0} 个同路径内容。发布时只更新已确认范围，不会自动删除。", this.preview.conflicts.length),
             });
         }
 
         let titleInput: HTMLInputElement | null = null;
         new Setting(this.contentEl)
-            .setName("发布空间名称")
-            .setDesc("在 SmartKeep MD 与书签中展示的名称")
+            .setName(localize("发布空间名称"))
+            .setDesc(localize("在 SmartKeep MD 与书签中展示的名称"))
             .addText((text) => {
-                text.setValue(this.preview.scope.title).setPlaceholder("例如：我的技术笔记");
+                text.setValue(this.preview.scope.title).setPlaceholder(localize("例如：我的技术笔记"));
                 titleInput = text.inputEl;
             });
 
@@ -168,11 +169,11 @@ export class PublishSetupModal extends Modal {
         let passwordInput: HTMLInputElement | null = null;
 
         new Setting(this.contentEl)
-            .setName("访问权限")
-            .setDesc("选择公开访问或密码保护")
+            .setName(localize("访问权限"))
+            .setDesc(localize("选择公开访问或密码保护"))
             .addDropdown((dropdown) => {
-                dropdown.addOption("public", "公开访问（可被搜索引擎收录）");
-                dropdown.addOption("password", "密码访问（不允许搜索引擎收录）");
+                dropdown.addOption("public", localize("公开访问（可被搜索引擎收录）"));
+                dropdown.addOption("password", localize("密码访问（不允许搜索引擎收录）"));
                 dropdown.setValue(this.access);
                 dropdown.onChange((value) => {
                     this.access = value as "public" | "password";
@@ -183,11 +184,11 @@ export class PublishSetupModal extends Modal {
             });
 
         passwordSetting = new Setting(this.contentEl)
-            .setName("访问密码")
-            .setDesc("至少需 6 个字符")
+            .setName(localize("访问密码"))
+            .setDesc(localize("至少需 6 个字符"))
             .addText((text) => {
                 text.inputEl.type = "password";
-                text.setPlaceholder("输入访问密码");
+                text.setPlaceholder(localize("输入访问密码"));
                 passwordInput = text.inputEl;
             });
         passwordSetting.setClass("smartmd-publish-password-hidden");
@@ -195,34 +196,34 @@ export class PublishSetupModal extends Modal {
         const actions = this.contentEl.createDiv({ cls: "smartmd-modal-actions" });
         const status = this.contentEl.createEl("p", { cls: "smartmd-modal-status" });
 
-        const cancel = actions.createEl("button", { text: "取消", attr: { type: "button" } });
+        const cancel = actions.createEl("button", { text: localize("取消"), attr: { type: "button" } });
         cancel.onclick = () => this.close();
 
-        const publish = actions.createEl("button", { text: "确认发布", cls: "mod-cta", attr: { type: "button" } });
+        const publish = actions.createEl("button", { text: localize("确认发布"), cls: "mod-cta", attr: { type: "button" } });
         publish.disabled = this.preview.blocked.length > 0;
 
         publish.onclick = async () => {
             if (this.submitted) return;
             const titleValue = (titleInput?.value || "").trim();
-            if (!titleValue) return void new Notice("请填写发布空间名称");
+            if (!titleValue) return void new Notice(localize("请填写发布空间名称"));
             const pwdValue = passwordInput?.value || "";
             if (this.access === "password" && pwdValue.length < 6) {
-                return void new Notice("访问密码至少需要 6 个字符");
+                return void new Notice(localize("访问密码至少需要 6 个字符"));
             }
             this.submitted = true;
             publish.disabled = true;
             cancel.disabled = true;
-            publish.setText("正在发布...");
-            status.setText("正在创建发布空间并上传 Markdown，请稍候。");
+            publish.setText(localize("正在发布..."));
+            status.setText(localize("正在创建发布空间并上传 Markdown，请稍候。"));
             try {
                 await this.submit({ title: titleValue, access: this.access, password: pwdValue });
                 this.close();
             } catch (error: any) {
-                status.setText(`发布失败：${String(error?.message || error)}`);
+                status.setText(localize("发布失败：{0}", localizeMessage(String(error?.message || error))));
                 status.addClass("smartmd-warning");
                 cancel.disabled = false;
                 publish.disabled = false;
-                publish.setText("确认发布");
+                publish.setText(localize("确认发布"));
             } finally {
                 this.submitted = false;
                 if (this.closed) this.releaseOnce();
@@ -252,8 +253,8 @@ export class PublishManagerModal extends Modal {
     }
 
     async onOpen(): Promise<void> {
-        this.titleEl.setText("账号云端空间（所有知识库）");
-        this.contentEl.createEl("p", { text: "正在加载发布状态…" });
+        this.titleEl.setText(localize("账号云端空间（所有知识库）"));
+        this.contentEl.createEl("p", { text: localize("正在加载发布状态…") });
         this.unsubscribe = this.service.subscribeStatus(() => void this.render());
         void this.service.refreshSpaces().finally(() => {
             this.loading = false;
@@ -270,69 +271,69 @@ export class PublishManagerModal extends Modal {
     private async render(): Promise<void> {
         this.contentEl.empty();
         if (this.loading) {
-            this.contentEl.createEl("p", { text: "正在加载发布状态…" });
+            this.contentEl.createEl("p", { text: localize("正在加载发布状态…") });
             return;
         }
         const refreshActions = this.contentEl.createDiv({ cls: "smartmd-actions" });
-        const refresh = refreshActions.createEl("button", { text: "重新对账", cls: "mod-cta" });
+        const refresh = refreshActions.createEl("button", { text: localize("重新对账"), cls: "mod-cta" });
         refresh.onclick = async () => {
             refresh.disabled = true;
-            refresh.setText("正在对账...");
+            refresh.setText(localize("正在对账..."));
             await this.service.refreshSpaces();
             await this.render();
         };
         if (this.service.hasPendingCreates()) {
-            this.contentEl.createEl("p", { text: "有首次发布尚未完成。请按原名称、访问方式和范围重新发起发布并确认，将复用原业务凭证；重新对账不会自动上传。", cls: "smartmd-warning" });
+            this.contentEl.createEl("p", { text: localize("有首次发布尚未完成。请按原名称、访问方式和范围重新发起发布并确认，将复用原业务凭证；重新对账不会自动上传。"), cls: "smartmd-warning" });
         }
-        this.contentEl.createEl("p", { text: "空间属于 SmartKeep 账号。所有知识库共用最多 3 个名额；撤回不需要本地原稿，更新正文仍需关联当前知识库。" });
+        this.contentEl.createEl("p", { text: localize("空间属于 SmartKeep 账号。所有知识库共用最多 3 个名额；撤回不需要本地原稿，更新正文仍需关联当前知识库。") });
         const count = this.service.accountSpaceCount();
-        this.contentEl.createEl("p", { text: count === null ? "账号空间：待查询" : `账号空间：${count}/3（所有知识库共用）` });
+        this.contentEl.createEl("p", { text: count === null ? localize("账号空间：待查询") : localize("账号空间：{0}/3（所有知识库共用）", count) });
         const spaces = this.service.accountSpaces();
         if (!spaces.length) {
-            this.contentEl.createEl("p", { text: "暂无发布空间。请在文档或文件夹菜单中选择发布。" });
+            this.contentEl.createEl("p", { text: localize("暂无发布空间。请在文档或文件夹菜单中选择发布。") });
             return;
         }
         for (const space of spaces) {
             const card = this.contentEl.createDiv({ cls: "smartmd-card" });
             card.createEl("h3", { text: space.title });
             card.createEl("p", {
-                text: `${this.service.scopeLabel(space)} · ${space.access === "public" ? "公开" : "密码访问"} · ${space.documents.length} 篇已发布 · ${space.pendingDocuments.length} 篇待同步 · ${space.feedbackOpen || 0} 条待处理`,
+                text: localize("{0} · {1} · {2} 篇已发布 · {3} 篇待同步 · {4} 条待处理", this.service.scopeLabel(space), space.access === "public" ? localize("公开") : localize("密码访问"), space.documents.length, space.pendingDocuments.length, space.feedbackOpen || 0),
             });
-            card.createEl("p", { text: `最后更新：${space.lastPublishedAt ? new Date(space.lastPublishedAt).toLocaleString() : "尚未上传正文"}` });
+            card.createEl("p", { text: localize("最后更新：{0}", space.lastPublishedAt ? new Date(space.lastPublishedAt).toLocaleString() : localize("尚未上传正文")) });
             card.createEl("p", {
                 text: space.scopeKnown === false && space.operationStatus === "needs_confirmation"
-                    ? "发布状态：云端空间可管理；更新正文需关联本地文件"
-                    : `发布状态：${this.service.statusLabel(space)}${space.statusMessage ? ` · ${space.statusMessage}` : ""}`,
+                    ? localize("发布状态：云端空间可管理；更新正文需关联本地文件")
+                    : localize("发布状态：{0}{1}", localizeMessage(this.service.statusLabel(space)), localizeMessage(space.statusMessage ? ` · ${space.statusMessage}` : "")),
                 cls: space.operationStatus === "failed" || (space.scopeKnown !== false && space.operationStatus === "needs_confirmation") ? "smartmd-warning" : "",
             });
-            card.createEl("p", { text: `SmartKeep 书签：${this.service.bookmarkLabel(space)}` });
+            card.createEl("p", { text: localize("SmartKeep 书签：{0}", this.service.bookmarkLabel(space)) });
             card.createEl("p", {
                 text: this.service.canRun(space)
-                    ? "本地关联：已确认当前知识库，可明确更新正文或撤回云端空间。"
-                    : "本地关联：尚未关联当前知识库。可查看反馈或撤回；关联并确认本地文件前不能更新正文。",
+                    ? localize("本地关联：已确认当前知识库，可明确更新正文或撤回云端空间。")
+                    : localize("本地关联：尚未关联当前知识库。可查看反馈或撤回；关联并确认本地文件前不能更新正文。"),
             });
             if (space.url) {
-                const link = card.createEl("a", { text: "打开发布页面", href: space.url });
+                const link = card.createEl("a", { text: localize("打开发布页面"), href: space.url });
                 link.target = "_blank";
             }
             const actions = card.createDiv({ cls: "smartmd-actions" });
             if (this.service.isBusy(space)) {
-                actions.createEl("button", { text: this.service.statusLabel(space) }).disabled = true;
+                actions.createEl("button", { text: localizeMessage(this.service.statusLabel(space)) }).disabled = true;
                 continue;
             }
             if (space.operationStatus === "failed" && space.pendingOperation && (space.pendingOperation.action === "withdraw" ? this.service.canWithdraw(space) : this.service.canRun(space))) {
                 const label = space.pendingOperation.action === "update"
                     ? "确认用当前本地内容重试更新"
                     : space.pendingOperation.action === "withdraw" ? "确认重试撤回" : "确认重试访问设置";
-                actions.createEl("button", { text: label, cls: "mod-cta" }).onclick = async () => {
+                actions.createEl("button", { text: localizeMessage(label), cls: "mod-cta" }).onclick = async () => {
                     await this.service.retryOperation(space.id);
                     await this.render();
                 };
             }
             if (this.service.canWithdraw(space) && !space.pendingOperation) {
-                actions.createEl("button", { text: "撤回空间" }).onclick = async () => {
+                actions.createEl("button", { text: localize("撤回空间") }).onclick = async () => {
                     if (!this.service.reserveConfirmation(space.id, "withdraw")) return;
-                    const approved = await confirm(this.app, "撤回发布空间", `确认撤回账号空间“${space.title}”？\n${space.url}\n其中 ${space.documents.length} 篇云端正文和留言将不再可访问，并释放 1 个账号名额；任何知识库中的本地文件都不会改变。`, "确认撤回");
+                    const approved = await confirm(this.app, localize("撤回发布空间"), localize("确认撤回账号空间“{0}”？\n{1}\n其中 {2} 篇云端正文和留言将不再可访问，并释放 1 个账号名额；任何知识库中的本地文件都不会改变。", space.title, space.url, space.documents.length), localize("确认撤回"));
                     if (approved) await this.service.withdrawSpace(space.id, false, true);
                     else await this.service.cancelReservedConfirmation(space.id);
                     await this.render();
@@ -344,40 +345,40 @@ export class PublishManagerModal extends Modal {
             }
             if (!this.service.canRun(space)) {
                 if (this.service.canConfirm(space)) {
-                    actions.createEl("button", { text: "确认账号与范围并恢复", cls: "mod-cta" }).onclick = async () => {
+                    actions.createEl("button", { text: localize("确认账号与范围并恢复"), cls: "mod-cta" }).onclick = async () => {
                         await this.service.confirmLegacySpace(space.id);
                         await this.render();
                     };
                 }
                 continue;
             }
-            actions.createEl("button", { text: "复制链接" }).onclick = async () => {
+            actions.createEl("button", { text: localize("复制链接") }).onclick = async () => {
                 if (!space.url) return;
                 await navigator.clipboard.writeText(space.url);
-                new Notice("发布链接已复制");
+                new Notice(localize("发布链接已复制"));
             };
-            actions.createEl("button", { text: "立即同步到云端" }).onclick = async () => {
+            actions.createEl("button", { text: localize("立即同步到云端") }).onclick = async () => {
                 await this.service.updateSpace(space.id, true, true);
                 await this.render();
             };
             if (space.pendingDocuments.length) {
-                actions.createEl("button", { text: "立即同步新增文档", cls: "mod-cta" }).onclick = async () => {
+                actions.createEl("button", { text: localize("立即同步新增文档"), cls: "mod-cta" }).onclick = async () => {
                     await this.service.approvePending(space.id);
                     await this.render();
                 };
             }
             if (space.pendingDeletes.length) {
-                actions.createEl("button", { text: `同步删除 ${space.pendingDeletes.length} 篇` }).onclick = async () => {
+                actions.createEl("button", { text: localize("同步删除 {0} 篇", space.pendingDeletes.length) }).onclick = async () => {
                     await this.service.confirmPendingDeletes(space.id);
                     await this.render();
                 };
             }
-            actions.createEl("button", { text: space.access === "public" ? "改为密码访问" : "改为公开" }).onclick = async () => {
+            actions.createEl("button", { text: space.access === "public" ? localize("改为密码访问") : localize("改为公开") }).onclick = async () => {
                 await this.service.toggleAccess(space.id);
                 await this.render();
             };
             if (["detached", "user_removed"].includes(space.bookmarkStatus)) {
-                actions.createEl("button", { text: "重新生成书签" }).onclick = async () => {
+                actions.createEl("button", { text: localize("重新生成书签") }).onclick = async () => {
                     await this.service.retryBookmark(space.id);
                     await this.render();
                 };
@@ -394,51 +395,51 @@ class FeedbackModal extends Modal {
     }
 
     onOpen(): void {
-        this.titleEl.setText(`${this.documentTitle || this.space.title} · 问题反馈`);
+        this.titleEl.setText(localize("{0} · 问题反馈", this.documentTitle || this.space.title));
         this.render();
     }
 
     private render(): void {
         this.contentEl.empty();
         const sorted = [...this.feedback].sort((a, b) => (a.status === "open" ? -1 : 1) - (b.status === "open" ? -1 : 1));
-        if (!sorted.length) return void this.contentEl.createEl("p", { text: "暂无问题反馈。" });
+        if (!sorted.length) return void this.contentEl.createEl("p", { text: localize("暂无问题反馈。") });
         for (const item of sorted) {
             const card = this.contentEl.createDiv({ cls: "smartmd-card" });
-            card.createEl("strong", { text: `${item.authorName} · ${item.status === "open" ? "待处理" : item.status === "resolved" ? "已解决" : "不采纳"}` });
-            card.createEl("p", { text: `文档：${item.documentPath || "文档路径未知"}` });
+            card.createEl("strong", { text: localizeMessage(`${item.authorName} · ${item.status === "open" ? "待处理" : item.status === "resolved" ? "已解决" : "不采纳"}`) });
+            card.createEl("p", { text: localize("文档：{0}", item.documentPath || localize("文档路径未知")) });
             card.createEl("blockquote", { text: item.quote });
             card.createEl("p", { text: item.body });
-            if (item.resolution) card.createEl("p", { text: `所有者结论：${item.resolution}` });
+            if (item.resolution) card.createEl("p", { text: localize("所有者结论：{0}", item.resolution) });
             const actions = card.createDiv({ cls: "smartmd-actions" });
-            const remove = actions.createEl("button", { text: "删除意见", cls: "mod-warning" });
+            const remove = actions.createEl("button", { text: localize("删除意见"), cls: "mod-warning" });
             remove.disabled = this.deleting.has(item.id);
             remove.onclick = async () => {
                 if (this.deleting.has(item.id)) return;
                 this.deleting.add(item.id);
                 remove.disabled = true;
                 try {
-                    const approved = await confirm(this.app, "删除意见", "确认删除这条修改意见？删除后无法恢复，文章正文和其他意见不受影响。", "确认删除");
+                    const approved = await confirm(this.app, localize("删除意见"), localize("确认删除这条修改意见？删除后无法恢复，文章正文和其他意见不受影响。"), localize("确认删除"));
                     if (!approved) return;
                     await this.service.deleteFeedback(this.space.id, item.id);
                     this.feedback = this.feedback.filter(feedback => feedback.id !== item.id);
                     this.render();
-                    new Notice("意见已删除");
+                    new Notice(localize("意见已删除"));
                 } catch {
-                    new Notice("删除未确认成功，意见仍保留在列表中，请重试。", 7000);
+                    new Notice(localize("删除未确认成功，意见仍保留在列表中，请重试。"), 7000);
                 } finally {
                     this.deleting.delete(item.id);
                     this.render();
                 }
             };
             if (item.status !== "open") continue;
-            actions.createEl("button", { text: "标记已解决", cls: "mod-cta" }).onclick = async () => {
+            actions.createEl("button", { text: localize("标记已解决"), cls: "mod-cta" }).onclick = async () => {
                 await this.service.setFeedbackStatus(this.space.id, item.id, "resolved", "已在本地处理并同步最新版");
                 item.status = "resolved";
                 item.resolution = "已在本地处理并同步最新版";
                 this.render();
             };
-            actions.createEl("button", { text: "不采纳" }).onclick = async () => {
-                const reason = window.prompt("请填写不采纳的简短理由");
+            actions.createEl("button", { text: localize("不采纳") }).onclick = async () => {
+                const reason = window.prompt(localize("请填写不采纳的简短理由"));
                 if (!reason?.trim()) return;
                 await this.service.setFeedbackStatus(this.space.id, item.id, "rejected", reason.trim());
                 item.status = "rejected";
@@ -529,7 +530,7 @@ export class PublishService {
 
     async openDocumentFeedback(file: TFile): Promise<void> {
         const target = this.feedbackForPath(file.path);
-        if (!target) return void new Notice("此文档暂无问题反馈。");
+        if (!target) return void new Notice(localize("此文档暂无问题反馈。"));
         await this.openFeedback(target.spaceId, target.documentId);
     }
 
@@ -717,9 +718,9 @@ export class PublishService {
         const scope = space.scope.type === "vault" ? "整个知识库" : space.scope.path;
         const approved = await confirm(
             this.app,
-            "确认旧发布空间",
-            `请确认当前账号拥有“${space.title}”，并确认继续使用原范围：${scope}。确认后恢复此范围 Markdown 新增、修改和删除的持续同步。`,
-            "确认并恢复",
+            localize("确认旧发布空间"),
+            localize("请确认当前账号拥有“{0}”，并确认继续使用原范围：{1}。确认后恢复此范围 Markdown 新增、修改和删除的持续同步。", space.title, scope),
+            localize("确认并恢复"),
         );
         if (!approved) return;
         this.authority.confirm(space as PublishedSpace & RunState);
@@ -793,7 +794,7 @@ export class PublishService {
     }
 
     scopeLabel(space: PublishedSpace): string {
-        return space.scope.type === "vault" ? "整个知识库" : space.scope.type === "folder" ? "文件夹" : "单篇文档";
+        return localize(space.scope.type === "vault" ? "整个知识库" : space.scope.type === "folder" ? "文件夹" : "单篇文档");
     }
 
     bookmarkLabel(space: PublishedSpace): string {
@@ -806,7 +807,7 @@ export class PublishService {
             failed: "同步失败，等待重试",
         };
         const label = labels[space.bookmarkStatus] || "等待同步";
-        return space.bookmarkError ? `${label}（${space.bookmarkError}）` : label;
+        return space.bookmarkError ? localize("{0}（{1}）", localizeMessage(label), localizeMessage(space.bookmarkError)) : localizeMessage(label);
     }
 
     async refreshSpaces(): Promise<void> {
@@ -998,9 +999,9 @@ export class PublishService {
 
     openPublishedLink(file: TAbstractFile): void {
         const target = this.publishedLink(file.path);
-        if (!target) return void new Notice("此范围没有可用发布链接，请刷新发布管理后重试。");
+        if (!target) return void new Notice(localize("此范围没有可用发布链接，请刷新发布管理后重试。"));
         if (file instanceof TFile && !target.documentPublished) {
-            new Notice("此文件尚未单独发布，已打开所属发布空间。新增正文正在等待自动同步。");
+            new Notice(localize("此文件尚未单独发布，已打开所属发布空间。新增正文正在等待自动同步。"));
         }
         window.open(target.url, "_blank");
     }
@@ -1018,30 +1019,30 @@ export class PublishService {
     }
 
     private async startPublish(scope: PublishScope): Promise<void> {
-        if (!this.auth.isSignedIn()) return void new Notice("请先登录 SmartKeep 账号，再开始发布");
-        if (this.publishWritesPaused()) return void new Notice("发布服务正在初始化或退出，请稍后再试");
+        if (!this.auth.isSignedIn()) return void new Notice(localize("请先登录 SmartKeep 账号，再开始发布"));
+        if (this.publishWritesPaused()) return void new Notice(localize("发布服务正在初始化或退出，请稍后再试"));
         const existing = this.publishedLink(scope.path);
         if (existing) {
-            new Notice("此范围已有发布空间，范围内的新增、修改和删除将自动同步。");
+            new Notice(localize("此范围已有发布空间，范围内的新增、修改和删除将自动同步。"));
             window.open(existing.url, "_blank");
             return;
         }
-        if (this.hasBlockingFailure()) return void new Notice("发布状态尚未恢复，请先使用“重新对账”");
+        if (this.hasBlockingFailure()) return void new Notice(localize("发布状态尚未恢复，请先使用“重新对账”"));
         const previewKey = `${scope.type}:${normalize(scope.path)}`;
-        if (this.activePreviews.has(previewKey)) return void new Notice("该发布范围正在准备中，请勿重复操作");
+        if (this.activePreviews.has(previewKey)) return void new Notice(localize("该发布范围正在准备中，请勿重复操作"));
         this.activePreviews.add(previewKey);
         try {
             const preview = await this.preview(scope);
             if (!preview.files.length) {
                 this.activePreviews.delete(previewKey);
-                return void new Notice("所选范围内没有 Markdown 文档");
+                return void new Notice(localize("所选范围内没有 Markdown 文档"));
             }
             new PublishSetupModal(this.app, preview, async (options) => {
                 await this.createSpace(preview, options);
             }, () => this.activePreviews.delete(previewKey)).open();
         } catch (error: any) {
             this.activePreviews.delete(previewKey);
-            new Notice(`发布预览失败：${String(error?.message || error)}`, 7000);
+            new Notice(localize("发布预览失败：{0}", localizeMessage(String(error?.message || error))), 7000);
         }
     }
 
@@ -1175,7 +1176,7 @@ export class PublishService {
             if (this.accountSpaceAccount === String(local.smartkeepAccountId || "")) this.accountSpaceIds.add(space.id);
             delete local.pendingPublishCreates[requestId];
             await (this.store as any).save();
-            new Notice(`发布完成：${preview.files.length} 篇文档`);
+            new Notice(localize("发布完成：{0} 篇文档", preview.files.length));
         } catch (error) {
             const status = Number((error as any)?.status || 0);
             if (!remoteId && status >= 400 && status < 500 && status !== 408) {
@@ -1389,7 +1390,7 @@ export class PublishService {
             space.reconciliationStatus = "matched";
             space.statusMessage = "云端已切换为完整新版本";
             await (this.store as any).save();
-            new Notice("云端已更新为本地最新版");
+            new Notice(localize("云端已更新为本地最新版"));
         } catch (error: any) {
             await this.handleOperationFailure(space, error);
             throw error;
@@ -1404,7 +1405,7 @@ export class PublishService {
         const space = this.spaces().find((item) => item.id === spaceId);
         if (!space || !this.canRun(space) || !space.pendingDeletes.length) return;
         await this.updateSpace(spaceId, false, true);
-        new Notice("已从云端移除确认删除的文档，本地回收规则不受影响");
+        new Notice(localize("已从云端移除确认删除的文档，本地回收规则不受影响"));
     }
 
     async toggleAccess(spaceId: string, retry = false): Promise<void> {
@@ -1428,13 +1429,13 @@ export class PublishService {
         }
         let password = "";
         if (access === "password") {
-            password = window.prompt("请输入至少 6 个字符的访问密码") || "";
+            password = window.prompt(localize("请输入至少 6 个字符的访问密码")) || "";
             if (password.length < 6) {
                 await this.cancelReservedConfirmation(spaceId);
-                return void new Notice("访问密码至少需要 6 个字符");
+                return void new Notice(localize("访问密码至少需要 6 个字符"));
             }
         } else {
-            const proceed = await confirm(this.app, "改为公开访问", "公开后页面可被搜索引擎收录，发布链接也会自动保存到 SmartKeep。", "确认公开");
+            const proceed = await confirm(this.app, localize("改为公开访问"), localize("公开后页面可被搜索引擎收录，发布链接也会自动保存到 SmartKeep。"), localize("确认公开"));
             if (!proceed) return await this.cancelReservedConfirmation(spaceId);
         }
         const ticket = this.authority.start(space as PublishedSpace & RunState);
@@ -1558,7 +1559,7 @@ export class PublishService {
             }
         }
         if (aiTaintChanged) {
-            void this.persistAiPending().catch(() => new Notice("公开审批状态尚未保存，请检查插件数据存储"));
+            void this.persistAiPending().catch(() => new Notice(localize("公开审批状态尚未保存，请检查插件数据存储")));
         }
         this.applyVaultRename(file, oldRoot, newRoot);
     }
@@ -1748,7 +1749,7 @@ export class PublishService {
         } finally {
             this.authority.finishFinal(ticket);
         }
-        new Notice("已停止发布，本地内容未改变");
+        new Notice(localize("已停止发布，本地内容未改变"));
     }
 
     private async currentSpaceVersion(spaceId: string): Promise<number> {
@@ -1797,7 +1798,7 @@ export class PublishService {
             return {} as T;
         } catch (error: any) {
             if (!quiet && !this.disposed && !this.signingOut && epoch === this.reconciliationEpoch) {
-                new Notice(`发布服务不可用：${String(error.message || error)}`, 7000);
+                new Notice(localize("发布服务不可用：{0}", localizeMessage(String(error.message || error))), 7000);
             }
             throw error;
         }

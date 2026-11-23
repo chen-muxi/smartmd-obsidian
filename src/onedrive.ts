@@ -1,3 +1,4 @@
+import { localize, localizeMessage } from "./localization";
 import {
     App,
     Modal,
@@ -210,41 +211,41 @@ export class SyncPreviewModal extends Modal {
     }
 
     onOpen(): void {
-        this.titleEl.setText("首次同步预览");
+        this.titleEl.setText(localize("首次同步预览"));
         const tipText = this.commitEnabled
-            ? "请核对文件范围。点击【确认并开始同步】将正式执行首次双向无损同步；取消或关闭窗口不会对本地或云端做任何修改。"
-            : "当前属于只读检查阶段，仅供核对文件范围。正式首次同步尚未开放，无法创建、上传、下载或删除任何文件。";
-        this.contentEl.createEl("p", { text: tipText });
+            ? localize("请核对文件范围。点击【确认并开始同步】将正式执行首次双向无损同步；取消或关闭窗口不会对本地或云端做任何修改。")
+            : localize("当前属于只读检查阶段，仅供核对文件范围。正式首次同步尚未开放，无法创建、上传、下载或删除任何文件。");
+        this.contentEl.createEl("p", { text: localizeMessage(tipText) });
         if (this.preview.identity) {
             const identity = this.preview.identity;
             this.contentEl.createEl("p", { text:
-                "微软账号：" + redactOneDriveText(identity.accountId) });
+                localize("微软账号：") + redactOneDriveText(identity.accountId) });
             this.contentEl.createEl("p", { text:
-                "本地 Vault ID：" + redactOneDriveText(identity.localVaultId) +
-                "；云端知识库 ID：" + redactOneDriveText(identity.cloudVaultId) });
+                localize("本地 Vault ID：") + redactOneDriveText(identity.localVaultId) +
+                localize("；云端知识库 ID：") + redactOneDriveText(identity.cloudVaultId) });
         }
         if (this.preview.priorHistoryCount) this.contentEl.createEl("p", { text:
-            "本次明确选择保留本地并创建全新独立云副本；旧 " + this.preview.priorHistoryCount +
-            " 项文件基线及完成历史会保留在本机归档。新副本完整核验前旧基线不清空；旧云库不修改，旧许可不能继承。" });
+            localize("本次明确选择保留本地并创建全新独立云副本；旧 ") + this.preview.priorHistoryCount +
+            localize(" 项文件基线及完成历史会保留在本机归档。新副本完整核验前旧基线不清空；旧云库不修改，旧许可不能继承。") });
         const list = this.contentEl.createEl("ul");
-        list.createEl("li", { text: `本地文件：${this.preview.localCount}` });
-        list.createEl("li", { text: `云端文件：${this.preview.remoteCount}` });
-        list.createEl("li", { text: `预计上传：${this.preview.uploadCount}` });
-        list.createEl("li", { text: `预计下载：${this.preview.downloadCount}` });
-        list.createEl("li", { text: `同路径内容相同：${this.preview.samePaths.length}` });
-        list.createEl("li", { text: `同路径内容冲突：${this.preview.conflictPaths.length}` });
-        list.createEl("li", { text: `因大小限制或排除规则跳过：${this.preview.skippedCount}` });
-        list.createEl("li", { text: `内容无法核实：${this.preview.unknownPaths.length}` });
+        list.createEl("li", { text: localize("本地文件：{0}", this.preview.localCount) });
+        list.createEl("li", { text: localize("云端文件：{0}", this.preview.remoteCount) });
+        list.createEl("li", { text: localize("预计上传：{0}", this.preview.uploadCount) });
+        list.createEl("li", { text: localize("预计下载：{0}", this.preview.downloadCount) });
+        list.createEl("li", { text: localize("同路径内容相同：{0}", this.preview.samePaths.length) });
+        list.createEl("li", { text: localize("同路径内容冲突：{0}", this.preview.conflictPaths.length) });
+        list.createEl("li", { text: localize("因大小限制或排除规则跳过：{0}", this.preview.skippedCount) });
+        list.createEl("li", { text: localize("内容无法核实：{0}", this.preview.unknownPaths.length) });
         const groups: Array<[string, string[], string]> = [
-            ["将上传", this.preview.uploadPaths, "本机 → 云端"],
-            ["将下载", this.preview.downloadPaths, "云端 → 本机"],
-            ["内容相同", this.preview.samePaths, "不传输（字节相同）"],
-            ["内容冲突（保留双方）", this.preview.conflictPaths, "暂停，保留双方原件"],
-            ["跳过", this.preview.skippedPaths, "不执行上传、下载或删除"],
-            ["无法确认（禁止执行）", this.preview.unknownPaths, "暂停，禁止执行"],
+            [localize("将上传"), this.preview.uploadPaths, localize("本机 → 云端")],
+            [localize("将下载"), this.preview.downloadPaths, localize("云端 → 本机")],
+            [localize("内容相同"), this.preview.samePaths, localize("不传输（字节相同）")],
+            [localize("内容冲突（保留双方）"), this.preview.conflictPaths, localize("暂停，保留双方原件")],
+            [localize("跳过"), this.preview.skippedPaths, localize("不执行上传、下载或删除")],
+            [localize("无法确认（禁止执行）"), this.preview.unknownPaths, localize("暂停，禁止执行")],
         ];
         for (const [label, paths, direction] of groups) {
-            this.contentEl.createEl("p", { text: `${label}：${paths.length} 项` });
+            this.contentEl.createEl("p", { text: localize("{0}：{1} 项", localizeMessage(label), paths.length) });
             const files = this.contentEl.createEl("ul");
             for (const path of paths) {
                 const item = this.preview.items?.[path];
@@ -255,37 +256,37 @@ export class SyncPreviewModal extends Modal {
                 const row = files.createEl("li").createEl("details");
                 row.addClass("smartmd-onedrive-preview-file");
                 row.createEl("summary", { text: redactOneDriveText(path) +
-                    "；来源：" + item.source + "；" + direction +
+                    localize("；来源：") + item.source + "；" + direction +
                     (item.skipReasons.length ? "；" + item.skipReasons.join("；") : "") });
                 if (this.preview.identity) row.createEl("p", { text:
-                    "目标范围：本地库 " + redactOneDriveText(this.preview.identity.localVaultId) +
-                    "；云库 " + redactOneDriveText(this.preview.identity.cloudVaultId) });
+                    localize("目标范围：本地库 ") + redactOneDriveText(this.preview.identity.localVaultId) +
+                    localize("；云库 ") + redactOneDriveText(this.preview.identity.cloudVaultId) });
                 row.createEl("p", { text: item.local
-                    ? `本机版本：${item.local.size} 字节；mtime ${item.local.mtime}；SHA-256：${item.local.sha256 || "未读取（跳过）"}`
-                    : "本机目标：预览时不存在，未经最终批准不会创建" });
+                    ? localize("本机版本：{0} 字节；mtime {1}；SHA-256：{2}", item.local.size, item.local.mtime, item.local.sha256 || localize("未读取（跳过）"))
+                    : localize("本机目标：预览时不存在，未经最终批准不会创建") });
                 row.createEl("p", { text: item.remote
-                    ? "云端 Item ID：" + redactOneDriveText(item.remote.id) +
+                    ? localize("云端 Item ID：") + redactOneDriveText(item.remote.id) +
                         "；ETag：" + redactOneDriveText(item.remote.etag) +
-                        `；${item.remote.size} 字节`
-                    : "云端目标：预览时不存在，未经最终批准不会创建" });
+                        localize("；{0} 字节", item.remote.size)
+                    : localize("云端目标：预览时不存在，未经最终批准不会创建") });
             }
         }
         const actions = this.contentEl.createDiv({ cls: "smartmd-actions" });
-        actions.createEl("button", { text: "取消" }).onclick = () => this.close();
-        const start = actions.createEl("button", { text: this.commitEnabled ? "确认并开始同步" : "尚未开放首次同步", cls: "mod-cta" });
+        actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
+        const start = actions.createEl("button", { text: this.commitEnabled ? localize("确认并开始同步") : localize("尚未开放首次同步"), cls: "mod-cta" });
         const unresolved = this.preview.conflictPaths.length > 0 ||
             this.preview.unknownPaths.length > 0 || this.preview.unexpectedNewTarget;
         if (unresolved) this.contentEl.createEl("p", {
             text: this.preview.unexpectedNewTarget
-                ? "拟新建的云端目标已有未登记内容，不能按全新空库提交；请重新检查云端身份。"
-                : "存在尚未解决的冲突或无法确认的内容，请重新检查或选择安全处理方式；本次不能开始同步。",
+                ? localize("拟新建的云端目标已有未登记内容，不能按全新空库提交；请重新检查云端身份。")
+                : localize("存在尚未解决的冲突或无法确认的内容，请重新检查或选择安全处理方式；本次不能开始同步。"),
         });
         start.disabled = !this.commitEnabled || unresolved;
         start.onclick = async () => {
             if (this.submitted || !this.commitEnabled || unresolved) return;
             this.submitted = true;
             this.close();
-            new Notice("SmartMD: 正在复核首次同步计划，复核通过后才会开始传输。", 5000);
+            new Notice(localize("SmartMD: 正在复核首次同步计划，复核通过后才会开始传输。"), 5000);
             try {
                 const success = await this.proceed((message) => {
                     const plugin = (this.app as any).plugins?.plugins?.smartmd;
@@ -294,10 +295,10 @@ export class SyncPreviewModal extends Modal {
                     }
                 });
                 if (success) {
-                    new Notice("SmartMD: 首次同步完成！所有笔记已就绪。", 6000);
+                    new Notice(localize("SmartMD: 首次同步完成！所有笔记已就绪。"), 6000);
                 }
             } catch (error: any) {
-                new Notice("SmartMD: 同步异常：" + safeOneDriveError(error), 8000);
+                new Notice(localize("SmartMD: 同步异常：") + localizeMessage(safeOneDriveError(error)), 8000);
             } finally {
                 this.settle();
             }
@@ -323,9 +324,9 @@ class AppFolderConsentModal extends Modal {
         private approve: (yes: boolean) => void) { super(app); }
     onOpen(): void {
         this.titleEl.setText(this.title);
-        this.contentEl.createEl("p", { text: this.explanation });
-        this.contentEl.createEl("button", { text: "暂不继续（默认）" }).onclick = () => this.close();
-        this.contentEl.createEl("button", { text: "明确确认，仅继续当前步骤", cls: "mod-cta" })
+        this.contentEl.createEl("p", { text: localizeMessage(this.explanation) });
+        this.contentEl.createEl("button", { text: localize("暂不继续（默认）") }).onclick = () => this.close();
+        this.contentEl.createEl("button", { text: localize("明确确认，仅继续当前步骤"), cls: "mod-cta" })
             .onclick = () => { this.completed = true; this.approve(true); this.close(); };
     }
     onClose(): void { this.contentEl.empty(); if (!this.completed) this.approve(false); }
@@ -344,44 +345,44 @@ class VaultSelectionModal extends Modal {
     }
 
     onOpen(): void {
-        this.titleEl.setText("选择云端知识库");
+        this.titleEl.setText(localize("选择云端知识库"));
         this.contentEl.createEl("p", {
-            text: "本地与云端知识库按各自 ID 区分，同名不等于同一份。默认暂不同步；登录和选择均不授权传输、创建或删除。",
+            text: localize("本地与云端知识库按各自 ID 区分，同名不等于同一份。默认暂不同步；登录和选择均不授权传输、创建或删除。"),
         });
-        this.contentEl.createEl("button", { text: "暂不同步（默认）" }).onclick = () => this.close();
+        this.contentEl.createEl("button", { text: localize("暂不同步（默认）") }).onclick = () => this.close();
         this.contentEl.createEl("button", {
-            text: "保留本地，创建新的云端副本",
+            text: localize("保留本地，创建新的云端副本"),
             cls: "mod-cta",
         }).onclick = () => this.finish("new");
         for (const vault of this.vaults) {
             const item = this.contentEl.createDiv({ cls: "smartmd-card" });
-            item.createEl("h3", { text: vault.name || "未命名知识库" });
-            item.createEl("p", { text: "云端 ID：" + vault.id });
-            const receive = item.createEl("button", { text: "使用云端，下载成另一份本地知识库" });
+            item.createEl("h3", { text: vault.name || localize("未命名知识库") });
+            item.createEl("p", { text: localize("云端 ID：") + vault.id });
+            const receive = item.createEl("button", { text: localize("使用云端，下载成另一份本地知识库") });
             // P1-DEC-02-R1: allow a verified independent, history-free Windows
             // Vault. Selection is still READ-ONLY, not execution consent.
             receive.disabled = !this.eligibleReceiver;
             if (this.eligibleReceiver) receive.onclick = () => this.finish(vault);
             if (this.allowDesktopRegistration) {
-                item.createEl("button", { text: "高级：仅登记完全一致的内容" }).onclick =
+                item.createEl("button", { text: localize("高级：仅登记完全一致的内容") }).onclick =
                     () => this.finish({ ...vault, registerIdentical: true });
-                item.createEl("button", { text: "高级：首次冲突仅保留两版" }).onclick =
+                item.createEl("button", { text: localize("高级：首次冲突仅保留两版") }).onclick =
                     () => this.finish({ ...vault, preserveFirstConflicts: true });
-                item.createEl("p", { text: "高级同内容登记另行核对双端全文，仅在全范围一致并最终确认后记录本机基线，不传正文、不删除、不自动同步。" });
+                item.createEl("p", { text: localize("高级同内容登记另行核对双端全文，仅在全范围一致并最终确认后记录本机基线，不传正文、不删除、不自动同步。") });
             }
             item.createEl("p", {
                 text: this.eligibleReceiver
-                    ? "当前本地知识库已核实独立且无旧文件/同步历史。请先查看下载预览，再明确确认；不会新建另一份云端知识库。"
-                    : "当前本地知识库未通过完整的独立空库与历史核验；为保护已有资料，暂不开放此操作。",
+                    ? localize("当前本地知识库已核实独立且无旧文件/同步历史。请先查看下载预览，再明确确认；不会新建另一份云端知识库。")
+                    : localize("当前本地知识库未通过完整的独立空库与历史核验；为保护已有资料，暂不开放此操作。"),
             });
         }
         this.contentEl.createEl("button", {
-            text: "两份都保留，不合并",
+            text: localize("两份都保留，不合并"),
         }).onclick = () => this.close();
-        const merge = this.contentEl.createEl("button", { text: "查看差异并安全合并" });
+        const merge = this.contentEl.createEl("button", { text: localize("查看差异并安全合并") });
         merge.disabled = true;
         this.contentEl.createEl("p", {
-            text: "高级合并必须先完成双端版本与冲突恢复方案核验，当前暂不可执行；现有内容不会被删除。",
+            text: localize("高级合并必须先完成双端版本与冲突恢复方案核验，当前暂不可执行；现有内容不会被删除。"),
         });
     }
 
@@ -2609,18 +2610,18 @@ export class OneDriveSyncService {
         return await new Promise<boolean>((resolve) => {
             const modal = new Modal(this.app); let decided = false;
             modal.onOpen = () => {
-                modal.titleEl.setText("首次冲突：仅在本机保留两版");
-                modal.contentEl.createEl("p", { text: `账号 ${preview.accountId}；本地库 ${preview.localVaultId}；云库 ${preview.cloudVaultId}。上传0、覆盖0、删除0；仅保存以下两版恢复副本，不绑定或开启同步。未冲突项不传输。` });
-                modal.contentEl.createEl("p", { text: "完整适用范围 " + preview.files.length + " 项；冲突 " + preview.conflicts.length +
-                    " 项；上传 0 项；原路径落地下载/覆盖 0 项；远程只读读取用于比对，确认后仅保存双版恢复副本。" });
+                modal.titleEl.setText(localize("首次冲突：仅在本机保留两版"));
+                modal.contentEl.createEl("p", { text: localize("账号 {0}；本地库 {1}；云库 {2}。上传0、覆盖0、删除0；仅保存以下两版恢复副本，不绑定或开启同步。未冲突项不传输。", preview.accountId, preview.localVaultId, preview.cloudVaultId) });
+                modal.contentEl.createEl("p", { text: localize("完整适用范围 ") + preview.files.length + localize(" 项；冲突 ") + preview.conflicts.length +
+                    localize(" 项；上传 0 项；原路径落地下载/覆盖 0 项；远程只读读取用于比对，确认后仅保存双版恢复副本。") });
                 for (const f of preview.conflicts) modal.contentEl.createEl("p", { text: f.path +
-                    "；本地SHA " + f.localHash + "；云端SHA " + f.remoteHash + "；Item ID " + f.remoteId + "；ETag " + f.remoteEtag +
-                    "；拟保全本地版 " + f.localCopyPath + "；拟保全云端版 " + f.cloudCopyPath + "（确认前尚不存在）" });
-                modal.contentEl.createEl("button", { text: "取消，保持零写入" }).onclick = () => modal.close();
-                modal.contentEl.createEl("button", { text: "独立确认，仅保存上述两版" }).onclick = async () => {
+                    localize("；本地SHA ") + f.localHash + localize("；云端SHA ") + f.remoteHash + "；Item ID " + f.remoteId + "；ETag " + f.remoteEtag +
+                    localize("；拟保全本地版 ") + f.localCopyPath + localize("；拟保全云端版 ") + f.cloudCopyPath + localize("（确认前尚不存在）") });
+                modal.contentEl.createEl("button", { text: localize("取消，保持零写入") }).onclick = () => modal.close();
+                modal.contentEl.createEl("button", { text: localize("独立确认，仅保存上述两版") }).onclick = async () => {
                     if (decided) return; decided = true;
                     try { await this.confirmFirstConflictPreservation(preview.ticket, true); resolve(false); }
-                    catch (error) { new Notice(safeOneDriveError(error), 8000); resolve(false); }
+                    catch (error) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); resolve(false); }
                     finally { modal.close(); }
                 };
             };
@@ -2791,20 +2792,20 @@ export class OneDriveSyncService {
         return await new Promise<boolean>((resolve) => {
             const modal = new Modal(this.app); let decided = false;
             modal.onOpen = () => {
-                modal.titleEl.setText("高级：仅登记完全一致的内容");
-                modal.contentEl.createEl("p", { text: "账号：" + preview.accountId + "；本地库：" + preview.localVaultId +
-                    "；云库：" + preview.cloudVaultId + "；设备：" + preview.deviceId });
-                modal.contentEl.createEl("p", { text: "以下全范围正文已一致；只保存本机绑定/基线，不上传、落地下载、覆盖或删除正文，不开启同步许可。" });
-                modal.contentEl.createEl("p", { text: "本次同内容：" + preview.files.length +
-                    " 项；正文上传：0；落地下载：0；删除：0；所有项目仍须本次独立确认后才登记。" });
+                modal.titleEl.setText(localize("高级：仅登记完全一致的内容"));
+                modal.contentEl.createEl("p", { text: localize("账号：") + preview.accountId + localize("；本地库：") + preview.localVaultId +
+                    localize("；云库：") + preview.cloudVaultId + localize("；设备：") + preview.deviceId });
+                modal.contentEl.createEl("p", { text: localize("以下全范围正文已一致；只保存本机绑定/基线，不上传、落地下载、覆盖或删除正文，不开启同步许可。") });
+                modal.contentEl.createEl("p", { text: localize("本次同内容：") + preview.files.length +
+                    localize(" 项；正文上传：0；落地下载：0；删除：0；所有项目仍须本次独立确认后才登记。") });
                 for (const file of preview.files) modal.contentEl.createEl("p", { text: file.path +
-                    "；大小：" + file.localSize + "字节；本地/云端SHA：" + file.localHash +
-                    "；远端ID：" + file.remoteId + "；ETag：" + file.remoteEtag });
-                modal.contentEl.createEl("button", { text: "取消，不登记" }).onclick = () => modal.close();
-                const confirm = modal.contentEl.createEl("button", { text: "独立确认，仅登记上述同内容基线" });
+                    localize("；大小：") + file.localSize + localize("字节；本地/云端SHA：") + file.localHash +
+                    localize("；远端ID：") + file.remoteId + "；ETag：" + file.remoteEtag });
+                modal.contentEl.createEl("button", { text: localize("取消，不登记") }).onclick = () => modal.close();
+                const confirm = modal.contentEl.createEl("button", { text: localize("独立确认，仅登记上述同内容基线") });
                 confirm.onclick = async () => { if (decided) return; decided = true; confirm.disabled = true;
                     try { resolve(await this.confirmIdenticalOneDriveRegistration(preview.ticket, true)); }
-                    catch (error) { new Notice(safeOneDriveError(error), 8000); resolve(false); }
+                    catch (error) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); resolve(false); }
                     finally { modal.close(); }
                 };
             };
@@ -2992,9 +2993,9 @@ export class OneDriveSyncService {
         if (settings.status === "stopping") return "正在停止，等待当前提交完成并核对状态";
         if (this.running || settings.status === "syncing") return "同步中";
         if (this.preparing || settings.status === "checking") return "正在连接 OneDrive 并检查同步范围";
-        if (settings.status === "partial_success") return settings.lastError || "部分同步完成（存在未同步文件）";
-        if (settings.status === "failed") return `同步失败：${settings.lastError || "未知原因"}`;
-        if (settings.status === "paused") return settings.lastError ? `同步未完成：${settings.lastError}` : "已暂停";
+        if (settings.status === "partial_success") return localizeMessage(settings.lastError) || localize("部分同步完成（存在未同步文件）");
+        if (settings.status === "failed") return localize("同步失败：{0}", localizeMessage(settings.lastError) || localize("未知原因"));
+        if (settings.status === "paused") return settings.lastError ? localize("同步未完成：{0}", localizeMessage(settings.lastError)) : "已暂停";
         if (settings.lastSuccessAt) return `上次成功：${new Date(settings.lastSuccessAt).toLocaleString()}`;
         return "尚未完成首次同步";
     }
@@ -3047,12 +3048,12 @@ export class OneDriveSyncService {
     private async performManualSync(): Promise<boolean> {
         const settings = this.settings();
         if ((settings as any).firstConflictPreservationJournal) {
-            new Notice("首次冲突原操作待处理；只可核验/导出两版，不会绑定或传输正文。", 8000);
+            new Notice(localize("首次冲突原操作待处理；只可核验/导出两版，不会绑定或传输正文。"), 8000);
             return false;
         }
         if (settings.identicalRegistrationJournal && !settings.firstSyncCompleted &&
             !((this.store as any).settings.local.oneDriveScopeIsolation && settings.identicalRegistrationJournal.phase === "COMPLETED")) {
-            new Notice("原同内容登记待核实；请先核验原操作，不会新建另一登记或传输正文。", 8000);
+            new Notice(localize("原同内容登记待核实；请先核验原操作，不会新建另一登记或传输正文。"), 8000);
             return false;
         }
         // Existing completed vaults may sync only under their recorded operation authority.
@@ -3247,7 +3248,7 @@ export class OneDriveSyncService {
                                 throw new Error(registered.reason || "云端独立库登记尚未确认");
                             }
                             assertFirstGrantCurrent();
-                            reportProgress("云端独立库已登记，正在校验每篇上传计划");
+                            reportProgress(localize("云端独立库已登记，正在校验每篇上传计划"));
                             const filesTicket = await this.prepareFirstFileTransfer(prepared.snapshot.localVersions, initialGeneration);
                             assertFirstGrantCurrent();
                             const filesConsent = this.approveFirstFileTransfer(
@@ -3290,7 +3291,7 @@ export class OneDriveSyncService {
             });
             return Boolean(settings.firstSyncCompleted);
         } catch (error: any) {
-            new Notice("OneDrive 首次连接已停止：" + safeOneDriveError(error), 8000);
+            new Notice(localize("OneDrive 首次连接已停止：") + localizeMessage(safeOneDriveError(error)), 8000);
             return false;
         } finally {
             this.activeFirstReceiverResume = false;
@@ -3563,7 +3564,7 @@ export class OneDriveSyncService {
         await (this.store as any).save();
         let currentProcessingPath = "";
         try {
-            reportProgress?.("正在读取本地与云端状态…");
+            reportProgress?.(localize("正在读取本地与云端状态…"));
             const local = prepared?.local || this.localFiles();
             const allRemote = prepared?.allRemote || await this.remoteFiles();
             if (allRemote.some((item) => item.path.startsWith("_suite_staging/"))) {
@@ -3639,14 +3640,14 @@ export class OneDriveSyncService {
                         if (localItem.size !== remoteItem.size) {
                             firstSyncMatches.set(path, false);
                             completed++;
-                            reportProgress?.(`正在确认同路径文件 ${completed}/${candidates.length}…`);
+                            reportProgress?.(localize("正在确认同路径文件 {0}/{1}…", completed, candidates.length));
                             continue;
                         }
                         // 层次二：空文件剪枝（0ms）
                         if (localItem.size === 0 && remoteItem.size === 0) {
                             firstSyncMatches.set(path, true);
                             completed++;
-                            reportProgress?.(`正在确认同路径文件 ${completed}/${candidates.length}…`);
+                            reportProgress?.(localize("正在确认同路径文件 {0}/{1}…", completed, candidates.length));
                             continue;
                         }
 
@@ -3658,7 +3659,7 @@ export class OneDriveSyncService {
                             if (localHash === remoteItem.quickXorHash) {
                                 firstSyncMatches.set(path, true);
                                 completed++;
-                                reportProgress?.(`正在确认同路径文件 ${completed}/${candidates.length}…`);
+                                reportProgress?.(localize("正在确认同路径文件 {0}/{1}…", completed, candidates.length));
                                 continue;
                             }
                         }
@@ -3671,7 +3672,7 @@ export class OneDriveSyncService {
                                 if (hex === remoteItem.sha1Hash.toUpperCase()) {
                                     firstSyncMatches.set(path, true);
                                     completed++;
-                                    reportProgress?.(`正在确认同路径文件 ${completed}/${candidates.length}…`);
+                                    reportProgress?.(localize("正在确认同路径文件 {0}/{1}…", completed, candidates.length));
                                     continue;
                                 }
                             } catch {
@@ -3683,7 +3684,7 @@ export class OneDriveSyncService {
                         const remoteData = await this.remoteBytes(remoteItem);
                         firstSyncMatches.set(path, sameBytes(localData, remoteData));
                         completed++;
-                        reportProgress?.(`正在确认同路径文件 ${completed}/${candidates.length}…`);
+                        reportProgress?.(localize("正在确认同路径文件 {0}/{1}…", completed, candidates.length));
                     }
                 };
                 await Promise.all(Array.from(
@@ -4020,7 +4021,7 @@ export class OneDriveSyncService {
                     settings.lastSkippedCount = skippedPaths.size;
                     await (this.store as any).save();
                     this.statusCallback?.(`SmartMD: 部分同步 (${failedCount} 失败)`);
-                    new Notice(`OneDrive 同步部分完成：${successCount} 成功，${failedCount} 失败。可在设置查看详情。`, 8000);
+                    new Notice(localize("OneDrive 同步部分完成：{0} 成功，{1} 失败。可在设置查看详情。", successCount, failedCount), 8000);
                     return false;
                 } else {
                     settings.fileStates = this.mergePendingUploadBaselines(next);
@@ -4029,7 +4030,7 @@ export class OneDriveSyncService {
                     settings.lastSkippedCount = skippedPaths.size;
                     await (this.store as any).save();
                     this.statusCallback?.("SmartMD: 同步失败");
-                    new Notice(`OneDrive 同步失败：${settings.lastError}`, 8000);
+                    new Notice(localize("OneDrive 同步失败：{0}", localizeMessage(settings.lastError)), 8000);
                     return false;
                 }
             }
@@ -4048,7 +4049,7 @@ export class OneDriveSyncService {
                 settings.lastSkippedCount = skippedPaths.size;
                 await (this.store as any).save();
                 this.statusCallback?.("SmartMD: 同步存在未决项");
-                new Notice(`OneDrive 同步未完成：${settings.lastError}`, 8000);
+                new Notice(localize("OneDrive 同步未完成：{0}", localizeMessage(settings.lastError)), 8000);
                 return false;
             }
             const wasFirstCompleted = settings.firstSyncCompleted === true;
@@ -4057,7 +4058,7 @@ export class OneDriveSyncService {
             settings.lastSkippedCount = skippedPaths.size;
             settings.failedDiagnostics = [];
             try {
-                reportProgress?.("正在确认同步及恢复记录…");
+                reportProgress?.(localize("正在确认同步及恢复记录…"));
                 await this.syncSharedState(operation);
                 if (this.getPendingOneDriveIncomingSharedSettings()) {
                     // Successful file processing does not authorize applying
@@ -4066,7 +4067,7 @@ export class OneDriveSyncService {
                     settings.lastError = "云端插件共享设置有待本机独立确认，本轮尚未全部完成。";
                     await (this.store as any).save();
                     this.statusCallback?.("SmartMD: 共享设置待确认");
-                    new Notice("OneDrive 文件检查已结束，但共享设置仍待本机确认。", 8000);
+                    new Notice(localize("OneDrive 文件检查已结束，但共享设置仍待本机确认。"), 8000);
                     return false;
                 }
                 await this.purgeExpiredRecovery();
@@ -4076,7 +4077,7 @@ export class OneDriveSyncService {
                 settings.status = "ready";
                 settings.lastSuccessAt = Date.now();
                 settings.lastError = "";
-                reportProgress?.("正在保存同步结果…");
+                reportProgress?.(localize("正在保存同步结果…"));
                 await (this.store as any).save();
             } catch (error) {
                 settings.firstSyncCompleted = wasFirstCompleted;
@@ -4085,7 +4086,7 @@ export class OneDriveSyncService {
             }
             this.statusCallback?.("SmartMD: 已同步");
             if (!reportProgress && !silentSuccess) {
-                new Notice(skippedPaths.size ? `OneDrive 同步完成，${skippedPaths.size} 个文件因大小或排除规则未处理` : "OneDrive 同步完成");
+                new Notice(skippedPaths.size ? localize("OneDrive 同步完成，{0} 个文件因大小或排除规则未处理", skippedPaths.size) : localize("OneDrive 同步完成"));
             }
             return true;
 
@@ -6847,7 +6848,7 @@ export class OneDriveSyncService {
         };
         await (this.store as any).save();
         await this.download(operation, remote, local.path, local, false, await this.sha256Bytes(localData));
-        new Notice(`检测到双端修改，已保留两份：${local.path}`, 8000);
+        new Notice(localize("检测到双端修改，已保留两份：{0}", local.path), 8000);
     }
 
     private async readPhysicalBinary(path: string): Promise<ArrayBuffer> {
@@ -7316,7 +7317,7 @@ export class OneDriveSyncService {
         settings.lastError = `${safeOneDriveError(error)}${detail}`;
         console.error("[SmartMD OneDrive Sync Failure Detail]:", settings.lastError);
         await (this.store as any).save();
-        new Notice(`OneDrive 同步已暂停：${settings.lastError}`, 8000);
+        new Notice(localize("OneDrive 同步已暂停：{0}", localizeMessage(settings.lastError)), 8000);
     }
 
     private async purgeExpiredRecovery(): Promise<void> {
@@ -7333,9 +7334,9 @@ export class OneDriveSyncService {
                 (!entry.lastReminderAt ||
                  now - Number(entry.lastReminderAt) >= 30 * 24 * 60 * 60 * 1000)) {
                 entry.lastReminderAt = now;
-                new Notice("OneDrive 恢复档案待处理：" +
+                new Notice(localize("OneDrive 恢复档案待处理：") +
                     redactOneDriveText(entry.relativePath || "未知文件") +
-                    "。未解决或唯一副本不会自动删除。", 8000);
+                    localize("。未解决或唯一副本不会自动删除。"), 8000);
             }
             const safePaths =
                 original.startsWith(".suite-recovery/onedrive/") &&
@@ -7501,7 +7502,7 @@ export class OneDriveSyncService {
                 stepInstructions: [
                     "1. 在 SmartMD 设置面板点击【重新登录】；",
                     "2. 按照弹窗提示完成浏览器设备码授权；",
-                    "3. 登录成功后将自动继续未完成的文件同步。"
+                    "3. 登录后重新检查同步范围，再确认继续未完成的文件同步。"
                 ],
             };
         } else if (status === 504 || safeMsg.includes("504") || safeMsg.includes("timeout") || safeMsg.includes("fetch failed") || safeMsg.includes("ECONNRESET")) {

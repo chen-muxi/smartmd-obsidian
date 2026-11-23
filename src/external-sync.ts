@@ -1,3 +1,4 @@
+import { localize, localizeMessage } from "./localization";
 import {
     App,
     Modal,
@@ -60,37 +61,37 @@ class ExternalBindingModal extends Modal {
     onOpen(): void {
         this.modalEl.addClass("smartmd-external-modal");
         this.contentEl.addClass("smartmd-external-add-modal");
-        this.titleEl.setText("添加外部同步文件夹");
+        this.titleEl.setText(localize("添加外部同步文件夹"));
         this.contentEl.createEl("p", {
-            text: "插件会扫描所选文件夹及子目录中的全部 Markdown，保留原目录结构并在知识库内建立副本。知识库副本与外部原文档的修改会实时双向同步；图片、代码和附件不会被同步或改动。",
+            text: localize("插件会扫描所选文件夹及子目录中的全部 Markdown，保留原目录结构并在知识库内建立副本。知识库副本与外部原文档的修改会实时双向同步；图片、代码和附件不会被同步或改动。"),
         });
 
         const pathField = this.contentEl.createDiv({ cls: "smartmd-external-field" });
-        pathField.createEl("label", { text: "外部文件夹路径" });
+        pathField.createEl("label", { text: localize("外部文件夹路径") });
         const pathRow = pathField.createDiv({ cls: "smartmd-external-path-row" });
         const input = pathRow.createEl("input", { type: "text", cls: "smartmd-external-path-input" });
-        input.placeholder = "外部文件夹完整路径";
+        input.placeholder = localize("外部文件夹完整路径");
         input.oninput = () => this.folderPath = input.value.trim();
-        pathRow.createEl("button", { text: "浏览…" }).onclick = async () => {
+        pathRow.createEl("button", { text: localize("浏览…") }).onclick = async () => {
             const selected = await this.service.chooseFolder();
             if (selected) { this.folderPath = selected; input.value = selected; }
         };
 
         const nameField = this.contentEl.createDiv({ cls: "smartmd-external-field" });
-        nameField.createEl("label", { text: "知识库内名称（可选）" });
+        nameField.createEl("label", { text: localize("知识库内名称（可选）") });
         const nickname = nameField.createEl("input", { type: "text", cls: "smartmd-external-name-input" });
-        nickname.placeholder = "默认使用外部文件夹名称";
+        nickname.placeholder = localize("默认使用外部文件夹名称");
         nickname.oninput = () => this.nickname = nickname.value.trim();
         nameField.createEl("p", {
             cls: "setting-item-description smartmd-external-help",
-            text: "只用于知识库内显示和区分同名文件夹，不会修改外部文件夹名称。",
+            text: localize("只用于知识库内显示和区分同名文件夹，不会修改外部文件夹名称。"),
         });
 
         // 筛选规则设置折叠区
         const filterDetails = this.contentEl.createEl("details", { cls: "smartmd-external-filter-details" });
         filterDetails.addClass("smartmd-external-filter-details");
 
-        const filterSummary = filterDetails.createEl("summary", { text: "⚙️ 筛选规则设置（默认已自动排除 node_modules 等构建依赖）" });
+        const filterSummary = filterDetails.createEl("summary", { text: localize("⚙️ 筛选规则设置（默认已自动排除 node_modules 等构建依赖）") });
         filterSummary.addClass("smartmd-external-filter-summary");
 
         const filterContent = filterDetails.createDiv();
@@ -98,10 +99,10 @@ class ExternalBindingModal extends Modal {
 
         // 模式选择
         const modeRow = filterContent.createDiv({ cls: "smartmd-external-field" });
-        modeRow.createEl("label", { text: "筛选模式" });
+        modeRow.createEl("label", { text: localize("筛选模式") });
         const modeSelect = modeRow.createEl("select");
-        modeSelect.createEl("option", { text: "排除模式 (黑名单，推荐) - 排除指定目录与文件", value: "exclude" });
-        modeSelect.createEl("option", { text: "仅包含模式 (白名单) - 仅同步指定目录与文件", value: "include" });
+        modeSelect.createEl("option", { text: localize("排除模式 (黑名单，推荐) - 排除指定目录与文件"), value: "exclude" });
+        modeSelect.createEl("option", { text: localize("仅包含模式 (白名单) - 仅同步指定目录与文件"), value: "include" });
 
         // 开箱即用推荐项
         const presetBuildRow = filterContent.createDiv();
@@ -109,7 +110,7 @@ class ExternalBindingModal extends Modal {
         const presetBuildCheck = presetBuildRow.createEl("input", { type: "checkbox" });
         presetBuildCheck.checked = true;
         presetBuildCheck.id = "preset-build-new";
-        const presetBuildLabel = presetBuildRow.createEl("label", { text: " 自动排除常用构建缓存 (node_modules, dist, build, target 等)" });
+        const presetBuildLabel = presetBuildRow.createEl("label", { text: localize(" 自动排除常用构建缓存 (node_modules, dist, build, target 等)") });
         presetBuildLabel.htmlFor = "preset-build-new";
 
         const presetIDERow = filterContent.createDiv();
@@ -117,21 +118,21 @@ class ExternalBindingModal extends Modal {
         const presetIDECheck = presetIDERow.createEl("input", { type: "checkbox" });
         presetIDECheck.checked = true;
         presetIDECheck.id = "preset-ide-new";
-        const presetIDELabel = presetIDERow.createEl("label", { text: " 自动排除 IDE 与系统隐藏配置 (.vscode, .idea, .git, .obsidian 等)" });
+        const presetIDELabel = presetIDERow.createEl("label", { text: localize(" 自动排除 IDE 与系统隐藏配置 (.vscode, .idea, .git, .obsidian 等)") });
         presetIDELabel.htmlFor = "preset-ide-new";
 
         // 自定义规则文本框
         const rulesField = filterContent.createDiv({ cls: "smartmd-external-field" });
         rulesField.addClass("smartmd-external-rules-field");
-        rulesField.createEl("label", { text: "自定义规则（每行一条通配符或精确名称，例如 archive/** 或 *draft*）" });
+        rulesField.createEl("label", { text: localize("自定义规则（每行一条通配符或精确名称，例如 archive/** 或 *draft*）") });
         const rulesTextarea = rulesField.createEl("textarea");
         rulesTextarea.rows = 3;
-        rulesTextarea.placeholder = "例如：\narchive/**\n*draft*\nREADME.md";
+        rulesTextarea.placeholder = localize("例如：\narchive/**\n*draft*\nREADME.md");
         rulesTextarea.addClass("smartmd-external-rules-textarea");
 
         const actions = this.contentEl.createDiv({ cls: "smartmd-external-actions" });
-        actions.createEl("button", { text: "取消" }).onclick = () => this.close();
-        const preview = actions.createEl("button", { text: "预览并添加", cls: "mod-cta" });
+        actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
+        const preview = actions.createEl("button", { text: localize("预览并添加"), cls: "mod-cta" });
         preview.onclick = async () => {
             preview.disabled = true;
             try {
@@ -163,7 +164,7 @@ class ExternalBindingModal extends Modal {
                 this.close();
                 this.onAdded?.();
             } catch (error: any) {
-                new Notice(`无法添加：${String(error.message || error)}`, 7000);
+                new Notice(localize("无法添加：{0}", localizeMessage(String(error.message || error))), 7000);
             } finally {
                 preview.disabled = false;
             }
@@ -185,20 +186,20 @@ class BindingPreviewModal extends Modal {
     }
 
     onOpen(): void {
-        this.titleEl.setText("首次绑定预览");
-        this.contentEl.createEl("p", { text: `发现 ${this.preview.markdownCount} 篇 Markdown。` });
+        this.titleEl.setText(localize("首次绑定预览"));
+        this.contentEl.createEl("p", { text: localize("发现 {0} 篇 Markdown。", this.preview.markdownCount) });
         if (this.preview.filterSummary) {
-            this.contentEl.createEl("p", { text: `筛选设定：${this.preview.filterSummary}`, cls: "setting-item-description" });
+            this.contentEl.createEl("p", { text: localize("筛选设定：{0}", localizeMessage(this.preview.filterSummary)), cls: "setting-item-description" });
         }
-        this.contentEl.createEl("p", { text: `知识库位置：${this.preview.targetPath}` });
+        this.contentEl.createEl("p", { text: localize("知识库位置：{0}", this.preview.targetPath) });
         if (this.preview.conflicts.length) {
-            this.contentEl.createEl("p", { text: `有 ${this.preview.conflicts.length} 个潜在冲突。绑定后会暂停这些文档，不会自动覆盖。` });
+            this.contentEl.createEl("p", { text: localize("有 {0} 个潜在冲突。绑定后会暂停这些文档，不会自动覆盖。", this.preview.conflicts.length) });
             for (const path of this.preview.conflicts.slice(0, 10)) this.contentEl.createEl("div", { text: path });
         }
-        this.contentEl.createEl("p", { text: "首次绑定只从外部导入，不会删除或覆盖任何已有内容。" });
+        this.contentEl.createEl("p", { text: localize("首次绑定只从外部导入，不会删除或覆盖任何已有内容。") });
         const actions = this.contentEl.createDiv({ cls: "smartmd-actions" });
-        actions.createEl("button", { text: "取消" }).onclick = () => this.close();
-        const confirm = actions.createEl("button", { text: "确认绑定", cls: "mod-cta" });
+        actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
+        const confirm = actions.createEl("button", { text: localize("确认绑定"), cls: "mod-cta" });
         confirm.onclick = async () => {
             confirm.disabled = true;
             try { await this.confirmAdd(); this.close(); } finally { confirm.disabled = false; }
@@ -246,19 +247,19 @@ export class ExternalFilterModal extends Modal {
 
     private render(): void {
         this.contentEl.empty();
-        this.titleEl.setText(`【${this.binding.nickname}】筛选与排除规则`);
+        this.titleEl.setText(localize("【{0}】筛选与排除规则", this.binding.nickname));
 
         const intro = this.contentEl.createEl("p", {
-            text: "配置此文件夹同步时的过滤规则。修改规则后系统会自动重校准同步基线；受排除的已同步镜像会移入 Obsidian 回收站；外部源目录绝不删除，未同步创作必须先冷备成功。",
+            text: localize("配置此文件夹同步时的过滤规则。修改规则后系统会自动重校准同步基线；受排除的已同步镜像会移入 Obsidian 回收站；外部源目录绝不删除，未同步创作必须先冷备成功。"),
         });
         intro.addClass("smartmd-external-filter-intro");
 
         // 1. 模式选择
         const modeField = this.contentEl.createDiv({ cls: "smartmd-external-field" });
-        modeField.createEl("label", { text: "筛选模式" });
+        modeField.createEl("label", { text: localize("筛选模式") });
         const modeSelect = modeField.createEl("select");
-        modeSelect.createEl("option", { text: "排除模式 (黑名单，推荐) - 排除指定目录与文件", value: "exclude" });
-        modeSelect.createEl("option", { text: "仅包含模式 (白名单) - 仅同步指定目录与文件", value: "include" });
+        modeSelect.createEl("option", { text: localize("排除模式 (黑名单，推荐) - 排除指定目录与文件"), value: "exclude" });
+        modeSelect.createEl("option", { text: localize("仅包含模式 (白名单) - 仅同步指定目录与文件"), value: "include" });
         modeSelect.value = this.filterConfig.mode || "exclude";
         modeSelect.onchange = () => {
             this.filterConfig.mode = modeSelect.value as any;
@@ -266,7 +267,7 @@ export class ExternalFilterModal extends Modal {
 
         // 2. 开箱即用推荐预设
         const presetsBox = this.contentEl.createDiv({ cls: "smartmd-card" });
-        presetsBox.createEl("h4", { text: "开箱即用推荐预设", attr: { style: "margin: 0 0 8px;" } });
+        presetsBox.createEl("h4", { text: localize("开箱即用推荐预设"), attr: { style: "margin: 0 0 8px;" } });
 
         const presetBuildRow = presetsBox.createDiv();
         presetBuildRow.addClass("smartmd-external-preset-row");
@@ -276,7 +277,7 @@ export class ExternalFilterModal extends Modal {
         buildCheck.onchange = () => {
             this.filterConfig.builtinPresets.ignoreBuildArtifacts = buildCheck.checked;
         };
-        const buildLabel = presetBuildRow.createEl("label", { text: " 自动排除常用构建依赖与缓存 (node_modules, dist, build, target 等)" });
+        const buildLabel = presetBuildRow.createEl("label", { text: localize(" 自动排除常用构建依赖与缓存 (node_modules, dist, build, target 等)") });
         buildLabel.htmlFor = "modal-preset-build";
 
         const presetIDERow = presetsBox.createDiv();
@@ -287,20 +288,20 @@ export class ExternalFilterModal extends Modal {
         ideCheck.onchange = () => {
             this.filterConfig.builtinPresets.ignoreIDEConfig = ideCheck.checked;
         };
-        const ideLabel = presetIDERow.createEl("label", { text: " 自动排除 IDE 与系统隐藏配置 (.vscode, .idea, .git, .obsidian 等)" });
+        const ideLabel = presetIDERow.createEl("label", { text: localize(" 自动排除 IDE 与系统隐藏配置 (.vscode, .idea, .git, .obsidian 等)") });
         ideLabel.htmlFor = "modal-preset-ide";
 
         // 3. 用户自定义规则列表
         const rulesHeader = this.contentEl.createDiv();
         rulesHeader.addClass("smartmd-external-rules-header");
-        rulesHeader.createEl("label", { text: `自定义规则 (${this.filterConfig.userRules.length} 条)`, attr: { style: "font-weight: bold;" } });
+        rulesHeader.createEl("label", { text: localize("自定义规则 ({0} 条)", this.filterConfig.userRules.length), attr: { style: "font-weight: bold;" } });
 
         const ruleListContainer = this.contentEl.createDiv();
         ruleListContainer.addClass("smartmd-external-rule-list");
 
         if (this.filterConfig.userRules.length === 0) {
             ruleListContainer.createEl("p", {
-                text: "暂无自定义规则。下方可快速添加通配符或精确匹配规则。",
+                text: localize("暂无自定义规则。下方可快速添加通配符或精确匹配规则。"),
                 attr: { style: "margin: 6px; color: var(--text-muted); font-size: 13px;" },
             });
         } else {
@@ -311,7 +312,7 @@ export class ExternalFilterModal extends Modal {
 
                 // 类型徽章
                 const syntaxBadge = row.createEl("span", {
-                    text: rule.syntax === "exact" ? "精确" : rule.syntax === "regex" ? "正则" : "通配符",
+                    text: rule.syntax === "exact" ? localize("精确") : rule.syntax === "regex" ? localize("正则") : localize("通配符"),
                 });
                 syntaxBadge.addClass("smartmd-external-rule-syntax");
 
@@ -319,7 +320,7 @@ export class ExternalFilterModal extends Modal {
 
                 // 维度徽章
                 const targetBadge = row.createEl("span", {
-                    text: rule.target === "folder" ? "文件夹" : rule.target === "file" ? "文件" : "全部",
+                    text: rule.target === "folder" ? localize("文件夹") : rule.target === "file" ? localize("文件") : localize("全部"),
                 });
                 targetBadge.addClass("smartmd-external-rule-target");
 
@@ -328,7 +329,7 @@ export class ExternalFilterModal extends Modal {
                 patText.addClass("smartmd-external-rule-pattern");
 
                 // 删除按钮
-                const delBtn = row.createEl("button", { text: "删除" });
+                const delBtn = row.createEl("button", { text: localize("删除") });
                 delBtn.addClass("smartmd-external-rule-delete");
                 delBtn.onclick = () => {
                     this.filterConfig.userRules.splice(i, 1);
@@ -340,23 +341,23 @@ export class ExternalFilterModal extends Modal {
         // 4. 添加新规则输入栏
         const addCard = this.contentEl.createDiv({ cls: "smartmd-card" });
         addCard.addClass("smartmd-external-rule-form");
-        addCard.createEl("h4", { text: "添加规则", attr: { style: "margin: 0 0 8px;" } });
+        addCard.createEl("h4", { text: localize("添加规则"), attr: { style: "margin: 0 0 8px;" } });
 
         const addRow = addCard.createDiv();
         addRow.addClass("smartmd-external-rule-fields");
 
         const patternInput = addRow.createEl("input", { type: "text" });
-        patternInput.placeholder = "例如 archive/** 或 *draft* 或 README.md";
+        patternInput.placeholder = localize("例如 archive/** 或 *draft* 或 README.md");
 
         const targetSelect = addRow.createEl("select");
-        targetSelect.createEl("option", { text: "全维度匹配", value: "all" });
-        targetSelect.createEl("option", { text: "仅文件夹", value: "folder" });
-        targetSelect.createEl("option", { text: "仅文件", value: "file" });
+        targetSelect.createEl("option", { text: localize("全维度匹配"), value: "all" });
+        targetSelect.createEl("option", { text: localize("仅文件夹"), value: "folder" });
+        targetSelect.createEl("option", { text: localize("仅文件"), value: "file" });
 
         const syntaxSelect = addRow.createEl("select");
-        syntaxSelect.createEl("option", { text: "通配符 (* / ** / ?)", value: "glob" });
-        syntaxSelect.createEl("option", { text: "精确匹配 (完全一致)", value: "exact" });
-        syntaxSelect.createEl("option", { text: "正则表达式 (高级)", value: "regex" });
+        syntaxSelect.createEl("option", { text: localize("通配符 (* / ** / ?)"), value: "glob" });
+        syntaxSelect.createEl("option", { text: localize("精确匹配 (完全一致)"), value: "exact" });
+        syntaxSelect.createEl("option", { text: localize("正则表达式 (高级)"), value: "regex" });
 
         patternInput.oninput = () => {
             const val = patternInput.value.trim();
@@ -367,11 +368,11 @@ export class ExternalFilterModal extends Modal {
             }
         };
 
-        const addBtn = addRow.createEl("button", { text: "添加", cls: "mod-cta" });
+        const addBtn = addRow.createEl("button", { text: localize("添加"), cls: "mod-cta" });
         addBtn.onclick = () => {
             const pat = patternInput.value.trim();
             if (!pat) {
-                new Notice("请输入规则表达式");
+                new Notice(localize("请输入规则表达式"));
                 return;
             }
             this.filterConfig.userRules.push({
@@ -388,27 +389,27 @@ export class ExternalFilterModal extends Modal {
         const tips = this.contentEl.createEl("div");
         tips.addClass("smartmd-external-rule-tips");
         tips.createEl("p", {
-            text: "💡 提示：支持零门槛通配符（* 匹配任意单层字符，** 匹配多级目录，? 匹配单个字符）与精确完全匹配。修改规则会将已同步的受排除知识库镜像移至回收站，不会删除外部源。",
+            text: localize("💡 提示：支持零门槛通配符（* 匹配任意单层字符，** 匹配多级目录，? 匹配单个字符）与精确完全匹配。修改规则会将已同步的受排除知识库镜像移至回收站，不会删除外部源。"),
             attr: { style: "margin: 4px 0;" },
         });
 
         // 6. 底部操作栏
         const actions = this.contentEl.createDiv({ cls: "smartmd-external-actions" });
-        actions.createEl("button", { text: "取消" }).onclick = () => this.close();
-        const saveBtn = actions.createEl("button", { text: "保存并立即生效", cls: "mod-cta" });
+        actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
+        const saveBtn = actions.createEl("button", { text: localize("保存并立即生效"), cls: "mod-cta" });
         saveBtn.onclick = async () => {
             saveBtn.disabled = true;
-            saveBtn.setText("正在保存并重校准…");
+            saveBtn.setText(localize("正在保存并重校准…"));
             try {
                 await this.service.updateFilterConfig(this.binding.id, this.filterConfig);
-                new Notice(`已更新“${this.binding.nickname}”的筛选规则并完成同步基线重校准！`, 5000);
+                new Notice(localize("已更新“{0}”的筛选规则并完成同步基线重校准！", this.binding.nickname), 5000);
                 this.close();
                 this.onSaved?.();
             } catch (err: any) {
-                new Notice(`保存失败：${String(err.message || err)}`, 8000);
+                new Notice(localize("保存失败：{0}", localizeMessage(String(err.message || err))), 8000);
             } finally {
                 saveBtn.disabled = false;
-                saveBtn.setText("保存并立即生效");
+                saveBtn.setText(localize("保存并立即生效"));
             }
         };
     }
@@ -422,7 +423,7 @@ export class ExternalSyncManagerModal extends Modal {
     }
 
     onOpen(): void {
-        this.titleEl.setText("外部文件夹同步");
+        this.titleEl.setText(localize("外部文件夹同步"));
         this.render();
         this.unsubscribe = this.service.subscribeStatus(() => this.render());
     }
@@ -436,13 +437,13 @@ export class ExternalSyncManagerModal extends Modal {
     private render(): void {
         this.contentEl.empty();
         this.contentEl.createEl("p", {
-            text: "每个外部文件夹都是独立同步项，可以分别暂停、立即同步或解除绑定。对其中一个文件夹执行操作，不会影响其他同步文件夹。",
+            text: localize("每个外部文件夹都是独立同步项，可以分别暂停、立即同步或解除绑定。对其中一个文件夹执行操作，不会影响其他同步文件夹。"),
         });
-        this.contentEl.createEl("button", { text: "添加同步文件夹", cls: "mod-cta" }).onclick = () => {
+        this.contentEl.createEl("button", { text: localize("添加同步文件夹"), cls: "mod-cta" }).onclick = () => {
             new ExternalBindingModal(this.app, this.service).open();
         };
         const bindings = this.service.bindings();
-        if (!bindings.length) this.contentEl.createEl("p", { text: "暂无外部同步文件夹。" });
+        if (!bindings.length) this.contentEl.createEl("p", { text: localize("暂无外部同步文件夹。") });
         for (const binding of bindings) {
             const card = this.contentEl.createDiv({ cls: "smartmd-card" });
             card.createEl("h3", { text: binding.nickname });
@@ -451,39 +452,39 @@ export class ExternalSyncManagerModal extends Modal {
                 ? `白名单模式 (${(binding.filterConfig.userRules || []).length} 条规则)`
                 : `排除模式 (${(binding.filterConfig?.userRules || []).length} 条规则)`;
             card.createEl("p", {
-                text: `${this.service.statusLabel(binding.status)} · 筛选: ${filterSummary} · 待处理 ${binding.pendingCount || 0} · 冲突 ${(binding.conflicts || []).length} · 可恢复 ${(binding.recoveryItems || []).length}`,
+                text: localize("{0} · 筛选: {1} · 待处理 {2} · 冲突 {3} · 可恢复 {4}", localizeMessage(this.service.statusLabel(binding.status)), localizeMessage(filterSummary), binding.pendingCount || 0, (binding.conflicts || []).length, (binding.recoveryItems || []).length),
             });
-            if (binding.lastSuccessAt) card.createEl("p", { text: `上次成功：${new Date(binding.lastSuccessAt).toLocaleString()}` });
-            if (binding.lastError) card.createEl("p", { text: binding.lastError, cls: "smartmd-warning" });
+            if (binding.lastSuccessAt) card.createEl("p", { text: localize("上次成功：{0}", new Date(binding.lastSuccessAt).toLocaleString()) });
+            if (binding.lastError) card.createEl("p", { text: localizeMessage(binding.lastError), cls: "smartmd-warning" });
             const actions = card.createDiv({ cls: "smartmd-actions" });
             if (binding.status === "active") {
-                actions.createEl("button", { text: "暂停" }).onclick = async () => { await this.service.pause(binding.id); this.render(); };
+                actions.createEl("button", { text: localize("暂停") }).onclick = async () => { await this.service.pause(binding.id); this.render(); };
             } else {
-                actions.createEl("button", { text: "恢复并重新比对" }).onclick = async () => { await this.service.resume(binding.id); this.render(); };
+                actions.createEl("button", { text: localize("恢复并重新比对") }).onclick = async () => { await this.service.resume(binding.id); this.render(); };
             }
-            actions.createEl("button", { text: "立即同步" }).onclick = async () => { await this.service.syncBinding(binding); this.render(); };
-            actions.createEl("button", { text: "⚙️ 筛选规则" }).onclick = () => {
+            actions.createEl("button", { text: localize("立即同步") }).onclick = async () => { await this.service.syncBinding(binding); this.render(); };
+            actions.createEl("button", { text: localize("⚙️ 筛选规则") }).onclick = () => {
                 new ExternalFilterModal(this.app, this.service, binding, () => this.render()).open();
             };
             if ((binding.conflicts || []).length) {
-                actions.createEl("button", { text: "查看冲突" }).onclick = () => this.openConflicts(binding);
+                actions.createEl("button", { text: localize("查看冲突") }).onclick = () => this.openConflicts(binding);
             }
             const pendingDeletes = this.service.listPendingDeletions(binding.id);
             if (pendingDeletes.length) {
-                actions.createEl("button", { text: "待人工确认的删除 " + pendingDeletes.length + " 篇" }).onclick =
+                actions.createEl("button", { text: localize("待人工确认的删除 ") + pendingDeletes.length + localize(" 篇") }).onclick =
                     () => this.openPendingDeletions(binding);
             }
             const pendingExports = this.service.listPendingExports(binding.id);
             if (pendingExports.length) {
-                actions.createEl("button", { text: "待确认外写 " + pendingExports.length + " 篇" }).onclick =
+                actions.createEl("button", { text: localize("待确认外写 ") + pendingExports.length + localize(" 篇") }).onclick =
                     () => this.openPendingExports(binding);
             }
             if ((binding.recoveryItems || []).length) {
-                actions.createEl("button", { text: "查看恢复区" }).onclick = () => this.openRecovery(binding);
+                actions.createEl("button", { text: localize("查看恢复区") }).onclick = () => this.openRecovery(binding);
             }
-            actions.createEl("button", { text: "解除此文件夹绑定" }).onclick = async () => {
+            actions.createEl("button", { text: localize("解除此文件夹绑定") }).onclick = async () => {
                 const confirmed = window.confirm(
-                    `确定解除“${binding.nickname}”的绑定吗？\n\n只会停止这个文件夹的同步，其他同步文件夹会继续运行。外部原文件夹和知识库内现有副本都会保留。`,
+                    localize("确定解除“{0}”的绑定吗？\n\n只会停止这个文件夹的同步，其他同步文件夹会继续运行。外部原文件夹和知识库内现有副本都会保留。", binding.nickname),
                 );
                 if (confirmed) {
                     await this.service.remove(binding.id);
@@ -494,51 +495,51 @@ export class ExternalSyncManagerModal extends Modal {
         const detached = this.service.recoveryArchives().filter((item: any) =>
             item.detached === true && Array.isArray(item.recoveryItems) && item.recoveryItems.length > 0,
         );
-        if (detached.length) this.contentEl.createEl("h3", { text: "已解绑的恢复档案" });
+        if (detached.length) this.contentEl.createEl("h3", { text: localize("已解绑的恢复档案") });
         for (const archive of detached) {
             const card = this.contentEl.createDiv({ cls: "smartmd-card" });
-            card.createEl("strong", { text: archive.nickname || "已解绑文件夹" });
+            card.createEl("strong", { text: archive.nickname || localize("已解绑文件夹") });
             card.createEl("p", {
-                text: `保留 ${archive.recoveryItems.length} 条恢复记录；仅能独立另存，不会重新授权外部同步。`,
+                text: localize("保留 {0} 条恢复记录；仅能独立另存，不会重新授权外部同步。", archive.recoveryItems.length),
             });
-            card.createEl("button", { text: "查看解绑恢复档案" }).onclick =
+            card.createEl("button", { text: localize("查看解绑恢复档案") }).onclick =
                 () => this.openRecovery(archive);
         }
     }
 
     private openConflicts(binding: any): void {
         this.contentEl.empty();
-        this.contentEl.createEl("h3", { text: `${binding.nickname} · 冲突中心` });
+        this.contentEl.createEl("h3", { text: localize("{0} · 冲突中心", binding.nickname) });
         for (const conflict of binding.conflicts || []) {
             const card = this.contentEl.createDiv({ cls: "smartmd-card" });
             card.createEl("strong", { text: conflict.relativePath });
-            card.createEl("p", { text: "两端内容均已完整保留，解决前不会互相覆盖。" });
-            if (conflict.externalExists === false) card.createEl("p", { text: "外部版本：已删除", cls: "smartmd-warning" });
-            if (conflict.vaultExists === false) card.createEl("p", { text: "知识库版本：已删除", cls: "smartmd-warning" });
+            card.createEl("p", { text: localize("两端内容均已完整保留，解决前不会互相覆盖。") });
+            if (conflict.externalExists === false) card.createEl("p", { text: localize("外部版本：已删除"), cls: "smartmd-warning" });
+            if (conflict.vaultExists === false) card.createEl("p", { text: localize("知识库版本：已删除"), cls: "smartmd-warning" });
             const actions = card.createDiv({ cls: "smartmd-actions" });
-            actions.createEl("button", { text: "保留外部" }).onclick = async () => {
+            actions.createEl("button", { text: localize("保留外部") }).onclick = async () => {
                 try { await this.service.resolveConflict(binding.id, conflict.id, "external"); }
-                catch (e: any) { new Notice(String(e.message || e), 8000); }
+                catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                 this.render();
             };
-            actions.createEl("button", { text: "保留知识库" }).onclick = async () => {
+            actions.createEl("button", { text: localize("保留知识库") }).onclick = async () => {
                 try { await this.service.resolveConflict(binding.id, conflict.id, "vault"); }
-                catch (e: any) { new Notice(String(e.message || e), 8000); }
+                catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                 this.render();
             };
-            actions.createEl("button", { text: "保留两份", cls: "mod-cta" }).onclick = async () => {
+            actions.createEl("button", { text: localize("保留两份"), cls: "mod-cta" }).onclick = async () => {
                 try { await this.service.resolveConflict(binding.id, conflict.id, "both"); }
-                catch (e: any) { new Notice(String(e.message || e), 8000); }
+                catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                 this.render();
             };
         }
-        this.contentEl.createEl("button", { text: "返回" }).onclick = () => this.render();
+        this.contentEl.createEl("button", { text: localize("返回") }).onclick = () => this.render();
     }
 
     private openPendingDeletions(binding: any): void {
         this.contentEl.empty();
-        this.contentEl.createEl("h3", { text: binding.nickname + " · 待确认删除" });
-        this.contentEl.createEl("p", { text: "单端文件缺失不等于允许删除另一端。只有本批次用户明确选择的当前版本才会执行；外部原件移入隐藏恢复备份，知识库副本移入回收站，并保留独立恢复档案。" });
+        this.contentEl.createEl("h3", { text: binding.nickname + localize(" · 待确认删除") });
+        this.contentEl.createEl("p", { text: localize("单端文件缺失不等于允许删除另一端。只有本批次用户明确选择的当前版本才会执行；外部原件移入隐藏恢复备份，知识库副本移入回收站，并保留独立恢复档案。") });
         const entries = this.service.listPendingDeletions(binding.id);
         const selected = new Set<string>();
         for (const entry of entries) {
@@ -550,61 +551,59 @@ export class ExternalSyncManagerModal extends Modal {
             };
             row.createEl("strong", { text: entry.relativePath });
             row.createEl("p", { text: entry.direction === "vault" ?
-                "将把外部原文件移到可恢复档案" : "将把知识库映射笔记移至Obsidian回收站" });
-            row.createEl("p", { text: "当前版本SHA256前缀：" + entry.hash.slice(0, 16) });
+                localize("将把外部原文件移到可恢复档案") : localize("将把知识库映射笔记移至Obsidian回收站") });
+            row.createEl("p", { text: localize("当前版本SHA256前缀：") + entry.hash.slice(0, 16) });
         }
-        this.contentEl.createEl("button", { text: "确认本批删除范围", cls: "mod-cta" }).onclick = async () => {
+        this.contentEl.createEl("button", { text: localize("确认本批删除范围"), cls: "mod-cta" }).onclick = async () => {
             const chosen = [...selected];
-            if (!chosen.length) { new Notice("请先勾选本批目标"); return; }
-            if (!window.confirm("将按勾选清单移走另一端的真实文件：" +
-                chosen.join("、") + "。操作前会建立恢复档案；确定本次版本与范围吗？")) return;
+            if (!chosen.length) { new Notice(localize("请先勾选本批目标")); return; }
+            if (!window.confirm(localize("将按勾选清单移走另一端的真实文件：{0}。操作前会建立恢复档案；确定本次版本与范围吗？", chosen.join("\n")))) return;
             try {
                 await this.service.confirmPendingDeletions(binding.id, chosen, true);
-                new Notice("已按确认清单完成处理，恢复记录已保留");
+                new Notice(localize("已按确认清单完成处理，恢复记录已保留"));
             } catch (error: any) {
-                new Notice("删除处理已停止：" + String(error.message || error), 8000);
+                new Notice(localize("删除处理已停止：") + localizeMessage(String(error.message || error)), 8000);
             }
             this.render();
         };
-        this.contentEl.createEl("button", { text: "取消返回" }).onclick = () => this.render();
+        this.contentEl.createEl("button", { text: localize("取消返回") }).onclick = () => this.render();
     }
 
     private openPendingExports(binding: any): void {
         this.contentEl.empty();
-        this.contentEl.createEl("h3", { text: binding.nickname + " · 审核待写出新稿" });
-        this.contentEl.createEl("p", { text: "只有本次勾选并确认的版本才会写往外部源目录。外部已有文件、内容变化或磁盘身份改变一律拒绝覆盖。" });
+        this.contentEl.createEl("h3", { text: binding.nickname + localize(" · 审核待写出新稿") });
+        this.contentEl.createEl("p", { text: localize("只有本次勾选并确认的版本才会写往外部源目录。外部已有文件、内容变化或磁盘身份改变一律拒绝覆盖。") });
         const items = this.service.listPendingExports(binding.id);
         const selected = new Set<string>();
         for (const item of items) {
             const row = this.contentEl.createDiv({ cls: "smartmd-card" });
             const toggle = row.createEl("input", { type: "checkbox" });
             toggle.onchange = () => { if (toggle.checked) selected.add(item.relativePath); else selected.delete(item.relativePath); };
-            row.createEl("strong", { text: "本地：" + item.vaultPath });
-            row.createEl("p", { text: "外写位置：" + item.externalPath });
-            row.createEl("p", { text: "本地版本摘要：" + item.hash.slice(0, 16) });
+            row.createEl("strong", { text: localize("本地：") + item.vaultPath });
+            row.createEl("p", { text: localize("外写位置：") + item.externalPath });
+            row.createEl("p", { text: localize("本地版本摘要：") + item.hash.slice(0, 16) });
         }
-        this.contentEl.createEl("button", { text: "确认所选文件外写", cls: "mod-cta" }).onclick = async () => {
+        this.contentEl.createEl("button", { text: localize("确认所选文件外写"), cls: "mod-cta" }).onclick = async () => {
             const chosen = [...selected];
-            if (!chosen.length) { new Notice("请先勾选文件"); return; }
-            if (!window.confirm("仅本次批准向外部目录新建下列 " + chosen.length +
-                " 篇 Markdown（不会覆盖已有文件）：\n" + chosen.join("\n") + "\n确认本次写出？")) return;
+            if (!chosen.length) { new Notice(localize("请先勾选文件")); return; }
+            if (!window.confirm(localize("仅本次批准向外部目录新建下列 {0} 篇 Markdown（不会覆盖已有文件）：\n{1}\n确认本次写出？", chosen.length, chosen.join("\n")))) return;
             try {
                 await this.service.confirmPendingExports(binding.id, chosen, true);
-                new Notice("本批外写已执行，已核对写回内容");
+                new Notice(localize("本批外写已执行，已核对写回内容"));
             } catch (error: any) {
-                new Notice("写出停止：" + String(error.message || error), 8000);
+                new Notice(localize("写出停止：") + localizeMessage(String(error.message || error)), 8000);
             }
             this.render();
         };
-        this.contentEl.createEl("button", { text: "取消并返回" }).onclick = () => this.render();
+        this.contentEl.createEl("button", { text: localize("取消并返回") }).onclick = () => this.render();
     }
 
     private openRecovery(binding: any): void {
         this.contentEl.empty();
-        this.contentEl.createEl("h3", { text: `${binding.nickname} · 7 天恢复区` });
+        this.contentEl.createEl("h3", { text: localize("{0} · 7 天恢复区", binding.nickname) });
         if (binding.detached === true) {
             this.contentEl.createEl("p", {
-                text: "已解绑：只允许将恢复记录另存为独立笔记，不会恢复原外部路径的写入或同步权限。",
+                text: localize("已解绑：只允许将恢复记录另存为独立笔记，不会恢复原外部路径的写入或同步权限。"),
                 cls: "smartmd-warning",
             });
         }
@@ -613,32 +612,32 @@ export class ExternalSyncManagerModal extends Modal {
             card.createEl("strong", { text: item.relativePath });
             card.createEl("p", { text: `${item.source === "external" ? "外部来源" : "知识库来源"} · ${new Date(item.deletedAt).toLocaleString()}` });
             if (!item.restoredAt && !item.exportedAt) {
-                card.createEl("button", { text: "另存恢复副本（不覆盖）" }).onclick = async () => {
+                card.createEl("button", { text: localize("另存恢复副本（不覆盖）") }).onclick = async () => {
                     try {
                         const location = await this.service.exportRecoveryToNewNote(binding.id, item.id);
-                        new Notice("已安全另存到：" + location);
+                        new Notice(localize("已安全另存到：") + location);
                         this.render();
-                    } catch (e: any) { new Notice(String(e.message || e), 8000); }
+                    } catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                 };
             }
             if (!item.restoredAt && !item.exportedAt && binding.detached !== true) {
-                card.createEl("button", { text: "恢复到两端", cls: "mod-cta" }).onclick = async () => {
+                card.createEl("button", { text: localize("恢复到两端"), cls: "mod-cta" }).onclick = async () => {
                     try { await this.service.restore(binding.id, item.id); this.render(); }
-                    catch (e: any) { new Notice(String(e.message || e), 8000); }
+                    catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                 };
             } else if (item.restoredAt || item.exportedAt) {
-                card.createEl("p", { text: item.resolvedAt ? "已确认解决；缓冲保留 7 天" :
-                    (item.exportedAt ? "已安全导出独立笔记；待确认解决" : "已恢复并核验；待确认解决") });
+                card.createEl("p", { text: item.resolvedAt ? localize("已确认解决；缓冲保留 7 天") :
+                    (item.exportedAt ? localize("已安全导出独立笔记；待确认解决") : localize("已恢复并核验；待确认解决")) });
                 if (!item.resolvedAt) {
-                    card.createEl("button", { text: "确认恢复问题已解决" }).onclick = async () => {
-                        if (!window.confirm("已逐项核验外部和知识库两端内容？确认后仍保留 7 天安全缓冲。")) return;
+                    card.createEl("button", { text: localize("确认恢复问题已解决") }).onclick = async () => {
+                        if (!window.confirm(localize("已逐项核验外部和知识库两端内容？确认后仍保留 7 天安全缓冲。"))) return;
                         try { await this.service.confirmRecoveryResolved(binding.id, item.id); this.render(); }
-                        catch (e: any) { new Notice(String(e.message || e), 8000); }
+                        catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                     };
                 }
             }
         }
-        this.contentEl.createEl("button", { text: "返回" }).onclick = () => this.render();
+        this.contentEl.createEl("button", { text: localize("返回") }).onclick = () => this.render();
     }
 }
 
@@ -1086,7 +1085,7 @@ export class ExternalSyncService {
         binding.lastSuccessAt = Date.now();
         await (this.store as any).save();
         this.authority.finishFinal(ticket);
-        new Notice(`已绑定 ${nickname}，首次导入未覆盖或删除任何内容`);
+        new Notice(localize("已绑定 {0}，首次导入未覆盖或删除任何内容", nickname));
     }
 
     private pathKey(value: string): string {
@@ -1295,7 +1294,7 @@ export class ExternalSyncService {
                 binding.status = "paused";
                 binding.lastError = `检测到外部 ${missingCount} 篇文档批量缺失（疑似整目录移动或批量误操作），已触发防误删风暴熔断保护，同步已暂停。请在设置面板确认后再恢复。`;
                 await (this.store as any).save();
-                new Notice(`[SmartMD] ${binding.nickname} 触发防误删风暴熔断保护：外部 ${missingCount} 篇文档缺失，已紧急暂停`, 9000);
+                new Notice(localize("[SmartMD] {0} 触发防误删风暴熔断保护：外部 {1} 篇文档缺失，已紧急暂停", binding.nickname, missingCount), 9000);
                 return;
             }
 
@@ -1551,7 +1550,7 @@ export class ExternalSyncService {
                 ? `同步失败，原版本已保留：${String(error.message || error)}`
                 : "外部文件夹不可访问。已暂停同步，不会将离线解释为删除。";
             await (this.store as any).save();
-            new Notice(`${binding.nickname} 已暂停：${binding.lastError}`, 8000);
+            new Notice(localize("{0} 已暂停：{1}", binding.nickname, localizeMessage(binding.lastError)), 8000);
         } finally {
             try {
                 if (this.authority.isFinalizing(ticket) && this.bindings().includes(binding)) {
@@ -1709,7 +1708,7 @@ export class ExternalSyncService {
 
         // 9. 明确的用户反馈提示
         if (prunedCount > 0 && typeof Notice !== "undefined") {
-            new Notice(`[SmartMD] 筛选规则已生效，已从知识库移出 ${prunedCount} 篇受排除文档`);
+            new Notice(localize("[SmartMD] 筛选规则已生效，已从知识库移出 {0} 篇受排除文档", prunedCount));
         }
     }
 
@@ -1782,7 +1781,7 @@ export class ExternalSyncService {
         const index = this.bindings().findIndex((item) => item.id === id);
         if (index >= 0) this.bindings().splice(index, 1);
         await (this.store as any).save();
-        new Notice(`已解除“${binding.nickname}”的绑定。其他同步项未受影响，外部原文件夹和知识库副本均已保留`);
+        new Notice(localize("已解除“{0}”的绑定。其他同步项未受影响，外部原文件夹和知识库副本均已保留", binding.nickname));
     }
 
     private validatedHiddenMarkdown(pathValue: string): string {
@@ -2058,7 +2057,7 @@ export class ExternalSyncService {
             Object.assign(conflict, replacement);
             binding.status = "conflict";
             await (this.store as any).save();
-            new Notice("冲突出现后内容再次变化，原选择已失效，请重新确认。", 8000);
+            new Notice(localize("冲突出现后内容再次变化，原选择已失效，请重新确认。"), 8000);
             return;
         }
         const externalExists = conflict.externalExists !== false;
@@ -2258,7 +2257,7 @@ export class ExternalSyncService {
             throw new Error(binding.lastError);
         }
         const approved = typeof window !== "undefined" && typeof window.confirm === "function"
-            && window.confirm(`确认将“${item.relativePath}”恢复到外部文件夹和知识库副本吗？`);
+            && window.confirm(localize("确认将“{0}”恢复到外部文件夹和知识库副本吗？", item.relativePath));
         if (!approved) return;
         // The above confirmation applies only to this recovery request.
         // It never creates or extends the binding's persistent run license.
@@ -2509,8 +2508,8 @@ export class ExternalSyncService {
                     (!item.lastReminderAt ||
                         (now >= expiresAt && now - Number(item.lastReminderAt) >= month))) {
                     item.lastReminderAt = now;
-                    new Notice("外部同步恢复档案待处理：" + String(item.relativePath || "未知文件") +
-                        "。未确认解决前不会自动销毁，请在恢复区核查。", 9000);
+                    new Notice(localize("外部同步恢复档案待处理：") + String(item.relativePath || "未知文件") +
+                        localize("。未确认解决前不会自动销毁，请在恢复区核查。"), 9000);
                 }
                 const resolvedAt = Number(item.resolvedAt || 0);
                 const bufferUntil = resolvedAt + 7 * 24 * 60 * 60 * 1000;

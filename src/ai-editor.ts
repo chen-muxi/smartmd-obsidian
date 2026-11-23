@@ -1,3 +1,4 @@
+import { localize, localizeMessage } from "./localization";
 import {
     ItemView,
     MarkdownView,
@@ -97,7 +98,7 @@ export class AIEditorView extends ItemView {
     }
 
     getDisplayText(): string {
-        return "AI 编辑";
+        return localize("AI 编辑");
     }
 
     getIcon(): string {
@@ -192,7 +193,7 @@ export class AIEditorView extends ItemView {
         delete session.draft;
         if (this.saveHistory()) return true;
         session.draft = draft;
-        new Notice("本机存储写入失败，草稿仍然保留，请重试。", 7000);
+        new Notice(localize("本机存储写入失败，草稿仍然保留，请重试。"), 7000);
         return false;
     }
 
@@ -236,13 +237,13 @@ export class AIEditorView extends ItemView {
 
     private confirmDeleteSession(session: ChatSession): void {
         const modal = new Modal(this.app);
-        modal.titleEl.setText("删除会话");
+        modal.titleEl.setText(localize("删除会话"));
         modal.contentEl.createEl("p", { text: sessionTitle(session) });
-        modal.contentEl.createEl("p", { text: "删除后，此会话的聊天记录和未应用草稿将从本机移除。" });
+        modal.contentEl.createEl("p", { text: localize("删除后，此会话的聊天记录和未应用草稿将从本机移除。") });
         const actions = modal.contentEl.createDiv({ cls: "modal-button-container" });
-        const cancel = actions.createEl("button", { text: "取消" });
+        const cancel = actions.createEl("button", { text: localize("取消") });
         cancel.onclick = () => modal.close();
-        const confirm = actions.createEl("button", { text: "确认删除", cls: "mod-warning" });
+        const confirm = actions.createEl("button", { text: localize("确认删除"), cls: "mod-warning" });
         confirm.onclick = () => {
             const index = this.sessions.indexOf(session);
             if (index < 0 || this.closed || this.busy || this.committing || this.restoring) {
@@ -254,7 +255,7 @@ export class AIEditorView extends ItemView {
             const deletingCurrent = session.id === this.sessionId;
             const next = deletingCurrent ? remaining[Math.min(index, remaining.length - 1)] : null;
             if (!this.saveHistory(remaining, next?.id ?? this.sessionId)) {
-                new Notice("未能删除会话，请稍后重试。");
+                new Notice(localize("未能删除会话，请稍后重试。"));
                 return;
             }
             this.sessions = remaining;
@@ -279,7 +280,7 @@ export class AIEditorView extends ItemView {
         const initialView = this.activeEditor();
         if (!openNote && (initialView?.file !== file || initialView?.getMode() !== "source")) return;
         if (!(file instanceof TFile)) {
-            new Notice("草稿对应的原笔记已找不到。");
+            new Notice(localize("草稿对应的原笔记已找不到。"));
             return;
         }
         this.restoring = true;
@@ -329,14 +330,14 @@ export class AIEditorView extends ItemView {
             if (await this.app.vault.read(file) !== disk) throw new Error("原笔记已变化，暂时无法恢复草稿。");
             if (!stillCurrent() || !this.documentMatches(target)) return;
             if (!this.showReview(change)) {
-                new Notice("编辑视图尚未准备好，请稍后重新选择此会话。");
+                new Notice(localize("编辑视图尚未准备好，请稍后重新选择此会话。"));
                 return;
             }
             this.quote = quote;
             this.suggestion = change;
             this.modelThread = { quote, file, messages: saved.history.slice() };
         } catch (error) {
-            if (stillCurrent()) new Notice(error instanceof Error ? error.message : "无法恢复草稿，请重试。");
+            if (stillCurrent()) new Notice(error instanceof Error ? error.message : localize("无法恢复草稿，请重试。"));
         } finally {
             this.restoring = false;
             if (!this.closed) this.render();
@@ -367,7 +368,7 @@ export class AIEditorView extends ItemView {
         if (!this.forgetDraft()) return;
         this.suggestion = null;
         this.preview?.clear();
-        this.addMessage({ role: "assistant", content: "已取消本次修改建议。" });
+        this.addMessage({ role: "assistant", content: localize("已取消本次修改建议。") });
         this.render();
     }
 
@@ -384,7 +385,7 @@ export class AIEditorView extends ItemView {
 
     useQuote(quote: ChatQuote): void {
         if (this.committing || this.restoring || !this.documentMatches(quote)) {
-            new Notice("选区已变化，请重新引用");
+            new Notice(localize("选区已变化，请重新引用"));
             return;
         }
         if (!this.forgetDraft()) return;
@@ -399,34 +400,34 @@ export class AIEditorView extends ItemView {
     private renderConversation(root: HTMLElement): HTMLElement {
         const transcript = root.createDiv({ cls: "smartmd-ai-transcript", attr: { role: "log", "aria-live": "polite" } });
         if (!this.messages.length) transcript.createEl("p", {
-            text: "在笔记编辑区右键，选择编辑选中文字或整篇文档。",
+            text: localize("在笔记编辑区右键，选择编辑选中文字或整篇文档。"),
             cls: "smartmd-ai-chat-hint"
         });
         for (const message of this.messages) {
             const bubble = transcript.createDiv({ cls: ["smartmd-ai-bubble", "smartmd-ai-" + message.role] });
-            bubble.createDiv({ cls: "smartmd-ai-sender", text: message.role === "user" ? "你" : "AI" });
+            bubble.createDiv({ cls: "smartmd-ai-sender", text: message.role === "user" ? localize("你") : "AI" });
             if (message.quote) {
-                bubble.createEl("small", { cls: "smartmd-ai-sent-quote", text: message.quote.filePath });
+                bubble.createEl("small", { cls: "smartmd-ai-sent-quote", text: localizeMessage(message.quote.filePath) });
             }
-            bubble.createDiv({ text: message.content });
+            bubble.createDiv({ text: localizeMessage(message.content) });
             const sources = webSources(message.sources);
             if (message.sources) {
                 const list = bubble.createDiv({ cls: "smartmd-ai-web-sources" });
-                list.createEl("strong", { text: sources.length ? "搜索来源" : "已联网搜索，服务未提供来源链接" });
+                list.createEl("strong", { text: sources.length ? localize("搜索来源") : localize("已联网搜索，服务未提供来源链接") });
                 for (const source of sources) {
                     list.createEl("a", { text: source.title, cls: "external-link",
                         attr: { href: source.url, target: "_blank", rel: "noopener noreferrer" } });
                 }
             }
         }
-        if (this.busy) transcript.createEl("p", { text: "正在回复…", cls: "smartmd-ai-chat-hint" });
+        if (this.busy) transcript.createEl("p", { text: localize("正在回复…"), cls: "smartmd-ai-chat-hint" });
 
         const composer = root.createDiv({ cls: "smartmd-ai-composer" });
         const saved = this.currentSession()?.draft;
         if (saved && !this.suggestion) {
             const tag = composer.createDiv({ cls: "smartmd-ai-quote" });
-            tag.createEl("strong", { text: saved.filePath + " · 未应用草稿" });
-            const discard = tag.createEl("button", { text: "取消草稿" });
+            tag.createEl("strong", { text: saved.filePath + localize(" · 未应用草稿") });
+            const discard = tag.createEl("button", { text: localize("取消草稿") });
             discard.disabled = this.busy || this.committing || this.restoring;
             discard.onclick = () => this.cancelReview();
         }
@@ -434,8 +435,8 @@ export class AIEditorView extends ItemView {
             const tag = composer.createDiv({ cls: "smartmd-ai-quote" });
             const editor = this.quote.view.editor;
             const line = editor.offsetToPos(this.quote.from).line + 1;
-            tag.createEl("strong", { text: this.quote.filePath + (this.quote.scope === "document" ? " · 整篇文档" : " · 第 " + line + " 行") });
-            const remove = tag.createEl("button", { text: "移除引用" });
+            tag.createEl("strong", { text: this.quote.filePath + (this.quote.scope === "document" ? localize(" · 整篇文档") : localize(" · 第 ") + line + localize(" 行")) });
+            const remove = tag.createEl("button", { text: localize("移除引用") });
             remove.disabled = this.committing || this.busy;
             remove.onclick = () => {
                 if (!this.forgetDraft()) return;
@@ -447,14 +448,14 @@ export class AIEditorView extends ItemView {
         }
         if (this.suggestion) {
             const change = this.suggestion;
-            const review = composer.createDiv({ cls: "smartmd-ai-batch-review", attr: { role: "group", "aria-label": "本轮修改建议" } });
+            const review = composer.createDiv({ cls: "smartmd-ai-batch-review", attr: { role: "group", "aria-label": localize("本轮修改建议") } });
             review.createEl("strong", {
-                text: change.kind === "edit" ? `本轮建议 · ${change.changes.length} 处修改` : "待清理的划线旧文",
+                text: change.kind === "edit" ? localize("本轮建议 · {0} 处修改", change.changes.length) : localize("待清理的划线旧文"),
             });
             const controls = review.createDiv({ cls: "smartmd-ai-batch-actions" });
-            const cancel = controls.createEl("button", { text: "取消本轮" });
+            const cancel = controls.createEl("button", { text: localize("取消本轮") });
             const apply = controls.createEl("button", {
-                text: change.kind === "edit" ? "应用全部" : "确认删除旧文", cls: "mod-cta",
+                text: change.kind === "edit" ? localize("应用全部") : localize("确认删除旧文"), cls: "mod-cta",
             });
             cancel.disabled = apply.disabled = this.busy || this.committing || this.restoring;
             cancel.onclick = () => { if (this.suggestion === change) this.cancelReview(); };
@@ -463,7 +464,7 @@ export class AIEditorView extends ItemView {
         const inputBox = composer.createDiv({ cls: "smartmd-ai-input-box" });
         const input = inputBox.createEl("textarea", {
             cls: "smartmd-ai-chat-input",
-            attr: { "aria-label": "给 AI 的消息", placeholder: this.quote ? "告诉 AI 怎样修改引用内容" : "给 AI 发消息" }
+            attr: { "aria-label": localize("给 AI 的消息"), placeholder: this.quote ? localize("告诉 AI 怎样修改引用内容") : localize("给 AI 发消息") }
         });
         input.value = this.chatInput;
         input.rows = 3;
@@ -477,14 +478,14 @@ export class AIEditorView extends ItemView {
         const actions = inputBox.createDiv({ cls: "smartmd-ai-composer-actions" });
         const searchLabel = actions.createEl("label", {
             cls: "smartmd-ai-web-search",
-            attr: { title: "本条消息使用模型服务的联网搜索" },
+            attr: { title: localize("本条消息使用模型服务的联网搜索") },
         });
         const search = searchLabel.createEl("input", { type: "checkbox" });
         search.checked = this.searchNext;
         search.disabled = this.committing || this.busy || this.restoring;
         search.onchange = () => { this.searchNext = search.checked; };
-        searchLabel.createSpan({ text: "联网搜索" });
-        const send = actions.createEl("button", { text: "发送", cls: "mod-cta" });
+        searchLabel.createSpan({ text: localize("联网搜索") });
+        const send = actions.createEl("button", { text: localize("发送"), cls: "mod-cta" });
         send.disabled = this.committing || this.busy || this.restoring;
         send.onclick = () => void this.sendConversation();
         return transcript;
@@ -502,17 +503,18 @@ export class AIEditorView extends ItemView {
         if (!input || this.busy || this.committing || this.restoring) return;
         const command = input.replace(/[。！!]+$/, "");
         const session = this.currentSession();
+        const undoCommand = /^(?:撤销|撤销本次 AI 修改|undo)$/i.test(command);
         if (((this.suggestion || session?.draft) && /^(?:应用|应用到笔记|应用全部|确认应用|取消|取消修改|取消本轮)$/.test(command))
-            || (this.undoRecord?.sessionId === this.sessionId && /^(?:撤销|撤销本次 AI 修改)$/.test(command))) {
+            || (this.undoRecord?.sessionId === this.sessionId && undoCommand)) {
             this.addMessage({ role: "user", content: input });
             this.chatInput = "";
             this.searchNext = false;
-            if (command.startsWith("撤销")) await this.undo();
+            if (undoCommand) await this.undo();
             else if (command.startsWith("取消")) this.cancelReview();
             else if (this.suggestion) await this.accept();
             else {
                 await this.restoreDraft();
-                if (this.suggestion) new Notice("请先查看笔记里的修改建议，再应用。");
+                if (this.suggestion) new Notice(localize("请先查看笔记里的修改建议，再应用。"));
             }
             this.render();
             return;
@@ -588,28 +590,32 @@ export class AIEditorView extends ItemView {
                 if (!this.forgetDraft()) return;
                 this.suggestion = null;
                 this.preview?.clear();
-                this.addMessage({ role: "assistant", content: "这次建议与原文相同。", sources: search ? reply.sources : undefined });
+                this.addMessage({ role: "assistant", content: localize("这次建议与原文相同。"), sources: search ? reply.sources : undefined });
                 return;
             }
             this.suggestion = change;
             if (session) {
                 session.draft = { filePath: change.filePath, base, from: change.from, to: change.to,
                     kind: change.scope ?? "cleanup", replacement: change.replacement, history: thread.messages.slice(-8) };
-                if (!this.saveHistory()) new Notice("本机存储写入失败，此草稿可能无法在重启后恢复。", 7000);
+                if (!this.saveHistory()) new Notice(localize("本机存储写入失败，此草稿可能无法在重启后恢复。"), 7000);
             }
             const shown = this.showReview(change);
             this.addMessage({ role: "assistant", content: shown
-                ? "建议已标在笔记里。可以继续告诉我要改哪里，确认后用输入框上方的操作区处理本轮建议。" : "建议已生成，请打开原笔记的编辑视图查看。",
+                ? localize("建议已标在笔记里。可以继续告诉我要改哪里，确认后用输入框上方的操作区处理本轮建议。") : localize("建议已生成，请打开原笔记的编辑视图查看。"),
                 sources: search ? reply.sources : undefined });
         } catch (error) {
             if (generation === this.sessionGeneration) {
-                this.addMessage({ role: "assistant", content: error instanceof Error ? error.message : "这次请求无法完成，请重试" });
+                this.addMessage({ role: "assistant", content: error instanceof Error ? localizeMessage(error.message) : localize("这次请求无法完成，请重试") });
             }
         } finally {
             if (this.activeRequestContext === requestContext) this.activeRequestContext = null;
             this.busy = false;
             this.render();
         }
+    }
+
+    refreshLanguage(): void {
+        this.render();
     }
 
     private render(jumpToLatest = false): void {
@@ -631,7 +637,7 @@ export class AIEditorView extends ItemView {
         this.transcriptResize?.disconnect();
         root.empty();
         root.addClass("suite-ai-view", "suite-ai-conversation");
-        root.createEl("h2", { text: "AI 编辑" });
+        root.createEl("h2", { text: localize("AI 编辑") });
         const newSummary = this.renderHistory(root.createDiv({ cls: "smartmd-ai-history-panel" }));
         const transcript = this.renderConversation(root);
         if (keepHistoryFocus) newSummary.focus({ preventScroll: true });
@@ -659,8 +665,8 @@ export class AIEditorView extends ItemView {
         const history = panel.createEl("details", { cls: "smartmd-ai-history" });
         history.open = this.historyOpen;
         history.ontoggle = () => { if (history.isConnected) this.historyOpen = history.open; };
-        const summary = history.createEl("summary", { attr: { "aria-label": "会话历史" } });
-        summary.createSpan({ text: "会话历史" });
+        const summary = history.createEl("summary", { attr: { "aria-label": localize("会话历史") } });
+        summary.createSpan({ text: localize("会话历史") });
         const current = this.currentSession();
         if (current) {
             const title = current.draft && !this.suggestion
@@ -679,12 +685,12 @@ export class AIEditorView extends ItemView {
                 this.historyOpen = history.open = false;
                 this.selectSession(session);
             };
-            const remove = row.createEl("button", { text: "删除", cls: "smartmd-ai-session-delete",
-                attr: { "aria-label": "删除会话 " + title } });
+            const remove = row.createEl("button", { text: localize("删除"), cls: "smartmd-ai-session-delete",
+                attr: { "aria-label": localize("删除会话 ") + title } });
             remove.disabled = busy;
             remove.onclick = () => this.confirmDeleteSession(session);
         }
-        const newChat = panel.createEl("button", { text: "新建会话" });
+        const newChat = panel.createEl("button", { text: localize("新建会话") });
         newChat.disabled = busy;
         newChat.onclick = () => {
             this.historyOpen = false;
@@ -754,8 +760,8 @@ export class AIEditorView extends ItemView {
         if (!conversation || (conversation.kind === "edit" && conversation.replacement === conversation.text)) return;
         if (!this.documentMatches(conversation)) return void this.invalidate();
         if (this.shownReview !== conversation) {
-            if (this.showReview(conversation)) new Notice("请先查看笔记里的修改建议，再应用。");
-            else new Notice("请打开原笔记的编辑视图查看建议。");
+            if (this.showReview(conversation)) new Notice(localize("请先查看笔记里的修改建议，再应用。"));
+            else new Notice(localize("请打开原笔记的编辑视图查看建议。"));
             return;
         }
         const { view, file, filePath, note: before } = conversation;
@@ -781,7 +787,7 @@ export class AIEditorView extends ItemView {
             this.preview?.clear();
             if (!this.preview?.replaceChanges(editor, before, conversation.changes)) {
                 if (!pendingBefore && approval && editor.getValue() === before) await publish.clearAiPending(filePath, approval.revision);
-                new Notice("编辑器未能按预览应用修改，请重新打开笔记后重试。", 7000);
+                new Notice(localize("编辑器未能按预览应用修改，请重新打开笔记后重试。"), 7000);
                 return;
             }
             this.undoRecord = {
@@ -795,15 +801,15 @@ export class AIEditorView extends ItemView {
                     throw new Error("Saved file does not match the applied change");
                 }
                 this.forgetDraft();
-                new Notice("已应用并保存修改");
+                new Notice(localize("已应用并保存修改"));
                 this.addMessage({ role: "assistant", content: conversation.kind === "edit"
-                    ? "已应用并保存修改。可以在这里说「撤销」。" : "已删除选定的划线旧文，保留了新文。" });
+                    ? localize("已应用并保存修改。可以在这里说「撤销」。") : localize("已删除选定的划线旧文，保留了新文。") });
             } catch {
-                new Notice("修改已应用到编辑器，尚未确认保存，请检查当前笔记", 7000);
-                this.addMessage({ role: "assistant", content: "改动已应用到编辑器，保存尚未确认。" });
+                new Notice(localize("修改已应用到编辑器，尚未确认保存，请检查当前笔记"), 7000);
+                this.addMessage({ role: "assistant", content: localize("改动已应用到编辑器，保存尚未确认。") });
             }
         } catch {
-            new Notice("无法完成 AI 修改，请检查插件数据保存状态", 7000);
+            new Notice(localize("无法完成 AI 修改，请检查插件数据保存状态"), 7000);
         } finally {
             this.committing = false;
             this.render();
@@ -816,7 +822,7 @@ export class AIEditorView extends ItemView {
         this.suggestion = null;
         this.preview?.clear();
         this.render();
-        if (this.currentSession()?.draft) new Notice("当前编辑位置已变化，选择原会话可恢复草稿。", 5500);
+        if (this.currentSession()?.draft) new Notice(localize("当前编辑位置已变化，选择原会话可恢复草稿。"), 5500);
     }
 
     private observeContextChange(): void {
@@ -833,7 +839,7 @@ export class AIEditorView extends ItemView {
         if (!record || record.sessionId !== this.sessionId || view?.file !== record.file || view.file.path !== record.filePath
             || this.app.vault.getAbstractFileByPath(record.filePath) !== record.file || view.editor.getValue() !== record.after
             || view.getMode() !== "source") {
-            return void new Notice("文档之后又发生了变化，无法安全撤销本次 AI 修改");
+            return void new Notice(localize("文档之后又发生了变化，无法安全撤销本次 AI 修改"));
         }
         this.committing = true;
         this.suggestion = null;
@@ -846,7 +852,7 @@ export class AIEditorView extends ItemView {
             if (saved !== record.after || this.activeEditor() !== view || view.file !== record.file
                 || this.app.vault.getAbstractFileByPath(record.filePath) !== record.file
                 || view.getMode() !== "source" || view.editor.getValue() !== record.after) {
-                new Notice("文档之后又发生了变化，无法安全撤销本次 AI 修改");
+                new Notice(localize("文档之后又发生了变化，无法安全撤销本次 AI 修改"));
                 return;
             }
             if (!this.preview?.replaceChanges(view.editor, record.after, record.reverse)) throw new Error("Could not restore the reviewed edit");
@@ -863,8 +869,8 @@ export class AIEditorView extends ItemView {
         } finally {
             this.committing = false;
         }
-        if (restored) this.addMessage({ role: "assistant", content: "已撤销本次 AI 修改。" });
+        if (restored) this.addMessage({ role: "assistant", content: localize("已撤销本次 AI 修改。") });
         this.render();
-        new Notice(restored ? "已撤销本次 AI 修改" : "未能确认撤销已保存，请检查当前笔记", restored ? undefined : 7000);
+        new Notice(restored ? localize("已撤销本次 AI 修改") : localize("未能确认撤销已保存，请检查当前笔记"), restored ? undefined : 7000);
     }
 }

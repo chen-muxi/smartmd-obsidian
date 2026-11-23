@@ -1,6 +1,6 @@
 # SmartMD
 
-SmartMD is an Obsidian plugin for publishing Markdown, syncing notes, and reviewing AI edits before applying them. The plugin interface is in Simplified Chinese. This release requires Obsidian 1.15.1 or later.
+SmartMD is an Obsidian plugin for publishing Markdown, syncing notes, and reviewing AI edits before applying them. The interface defaults to English. Open Settings → SmartMD → Home → Language to switch to Simplified Chinese. The choice is saved locally on this device. This release requires Obsidian 1.15.1 or later.
 
 ## Getting started
 

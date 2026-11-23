@@ -1,3 +1,4 @@
+import { localize } from "./localization";
 import { EditorSelection, EditorState, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
 import { editorInfoField, sanitizeHTMLToDom, type Editor } from "obsidian";
@@ -50,13 +51,13 @@ class NewTextWidget extends WidgetType {
         const body = block.createDiv({ cls: "smartmd-ai-block-body" });
         if (this.content) {
             if (this.content.trim()) renderDraft(body, this.content);
-            else body.setText("建议修改空行或空格");
+            else body.setText(localize("建议修改空行或空格"));
             const source = block.createEl("details", { cls: "smartmd-ai-block-source" });
             source.open = !this.content.trim() || (!body.textContent?.trim() && !body.querySelector("hr"));
-            source.createEl("summary", { text: "查看 Markdown" });
+            source.createEl("summary", { text: localize("查看 Markdown") });
             source.createEl("pre", { text: this.content });
         } else {
-            body.setText("建议删除此处");
+            body.setText(localize("建议删除此处"));
         }
         return block;
     }

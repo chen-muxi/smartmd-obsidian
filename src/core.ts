@@ -1,3 +1,4 @@
+import { localizeMessage } from "./localization";
 import { App, Notice, Platform, Plugin, requestUrl } from "obsidian";
 import { MicrosoftDeviceCodeSession, MicrosoftDeviceToken } from "./microsoft-device-flow";
 import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
@@ -994,5 +995,5 @@ export class GraphApiError extends Error {
 
 export function reportError(prefix: string, error: unknown): void {
     console.error(prefix, error);
-    new Notice(prefix + "：" + (error instanceof Error ? error.message : String(error)), 8000);
+    new Notice(localizeMessage(prefix + "：" + (error instanceof Error ? error.message : String(error))), 8000);
 }
