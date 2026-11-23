@@ -34,7 +34,7 @@ type ChatSession = {
 };
 const isChatMessage = (message: ChatMessage) => (message?.role === "user" || message?.role === "assistant") && typeof message.content === "string";
 const sessionTitle = (session: ChatSession) =>
-    session.messages.find(message => message.role === "user")?.content.trim().replace(/\s+/g, " ").slice(0, 34) || "新会话";
+    session.messages.find(message => message.role === "user")?.content.trim().replace(/\s+/g, " ").slice(0, 34) || localize("新会话");
 const atTranscriptEnd = (transcript: HTMLElement) =>
     transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop <= 2;
 
@@ -670,7 +670,7 @@ export class AIEditorView extends ItemView {
         const current = this.currentSession();
         if (current) {
             const title = current.draft && !this.suggestion
-                ? sessionTitle(current) + (this.restoring ? " · 恢复中" : " · 待恢复")
+                ? sessionTitle(current) + localize(this.restoring ? " · 恢复中" : " · 待恢复")
                 : sessionTitle(current);
             summary.createSpan({ cls: "smartmd-ai-current-session", text: title, attr: { title } });
         }
