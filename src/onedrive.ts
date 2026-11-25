@@ -142,6 +142,8 @@ type FirstConnectionSnapshot = {
     rulesHash: string;
     localVersions: string[];
     remoteVersions: string[];
+    localStructure?: string[];
+    remoteFolders?: string[];
 };
 
 type FirstCommitProposal = {
@@ -2646,20 +2648,33 @@ export class OneDriveSyncService {
             const androidMerge: PreparedSync["androidMerge"] = mergeAndroid ? new Map() : undefined;
             if (androidMerge) {
                 const skipped = new Set(skippedPaths);
-                const exactPaths = new Map<string, { path: string; isFile: boolean }>();
-                for (const path of [...localPaths, ...remoteMap.keys()]) {
-                    if (skipped.has(path)) continue;
-                    const parts = path.split("/");
+                const exactPaths = new Map<string, { path: string; isFile: boolean; included: boolean }>();
+                const inventory = [
+                    ...(prepared.snapshot.localStructure || []).map(entry => {
+                        const [path, isFile] = JSON.parse(entry) as [string, boolean];
+                        return { path, isFile, included: isFile && localPaths.has(path) && !skipped.has(path) };
+                    }),
+                    ...allRemote.map(file => ({
+                        path: file.path, isFile: true,
+                        included: remoteMap.has(file.path) && !skipped.has(file.path),
+                    })),
+                    ...(prepared.snapshot.remoteFolders || []).map(path => ({ path, isFile: false, included: false })),
+                ];
+                // Register participating paths first. Excluded entries still
+                // describe actual directories and occupied names.
+                for (const entry of inventory.filter(item => item.included).concat(inventory.filter(item => !item.included))) {
+                    const parts = entry.path.split("/");
                     let prefix = "";
                     for (const [index, part] of parts.entries()) {
                         prefix = prefix ? prefix + "/" + part : part;
-                        const isFile = index === parts.length - 1;
+                        const isFile = entry.isFile && index === parts.length - 1;
                         const key = prefix.normalize("NFC").toLocaleLowerCase("en-US");
                         const existing = exactPaths.get(key);
-                        if (existing && (existing.path !== prefix || existing.isFile !== isFile)) {
+                        if (existing && (existing.included || entry.included) &&
+                            (existing.path !== prefix || existing.isFile !== isFile)) {
                             throw new Error(localize("两端文件或文件夹名称不兼容，请先核对：{0}", prefix));
                         }
-                        exactPaths.set(key, { path: prefix, isFile });
+                        if (!existing) exactPaths.set(key, { path: prefix, isFile, included: entry.included });
                     }
                 }
                 // The first round adds files in either direction; it cannot infer a
@@ -5429,7 +5444,8 @@ export class OneDriveSyncService {
             if (data.byteLength !== item.size) throw new Error("预览期间本机文件版本发生变化");
             localVersions.push(JSON.stringify([item.path, item.size, item.mtime, await this.sha256Bytes(data)]));
         }
-        const remote = await this.remoteFiles(true, true);
+        const folderPaths = choice.mergeAndroid ? new Set<string>() : undefined;
+        const remote = await this.remoteFiles(true, true, folderPaths ? { vaultId: choice.id, folderPaths } : undefined);
         for (const item of remote) {
             if (!item.id || !item.path || !item.etag) {
                 throw new Error("云端文件身份或 ETag 不完整，已停止预览。");
@@ -5453,6 +5469,9 @@ export class OneDriveSyncService {
                     this.maxBytes(), settings.ignorePatterns || [], settings.firstSyncCompleted
                 ])),
                 localVersions: localVersions.sort(),
+                localStructure: choice.mergeAndroid ? this.app.vault.getAllLoadedFiles()
+                    .filter(file => file.path).map(file => JSON.stringify([file.path, file instanceof TFile])).sort() : undefined,
+                remoteFolders: folderPaths ? [...folderPaths].sort() : undefined,
                 remoteVersions: remote.map((item) =>
                     JSON.stringify([item.path, item.id, item.etag, item.size, item.mtime])
                 ).sort(),
@@ -5839,7 +5858,7 @@ export class OneDriveSyncService {
 
     private async remoteFiles(
         forceFull = false, readOnly = false,
-        firstCopy?: { vaultId: string; scope?: FirstUploadReadScope; onPage?: (page: number) => void },
+        firstCopy?: { vaultId: string; scope?: FirstUploadReadScope; onPage?: (page: number) => void; folderPaths?: Set<string> },
     ): Promise<RemoteFile[]> {
         firstCopy?.scope?.assertCurrent();
         this.ensureRemoteIdentityFresh();
@@ -5931,7 +5950,14 @@ export class OneDriveSyncService {
             const seenPaths = new Map<string, { id: string; etag: string; path: string }>();
             this.remoteIdentityConflict = null;
             for (const node of Object.values(cache.nodes) as any[]) {
-                if (node.folder) continue;
+                if (node.folder) {
+                    if (firstCopy?.folderPaths) {
+                        const relative = this.pathFromDeltaNode(node, cache.nodes, cache.rootId);
+                        if (!relative) throw new Error("云端文件夹路径无法核对，请重新同步");
+                        firstCopy.folderPaths.add(relative);
+                    }
+                    continue;
+                }
                 const relative = this.pathFromDeltaNode(node, cache.nodes, cache.rootId);
                 const windowsKey = relative.normalize("NFC").toLocaleLowerCase("en-US");
                 if (!relative || !node.id || !node.etag) {
