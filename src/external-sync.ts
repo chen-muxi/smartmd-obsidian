@@ -15,6 +15,9 @@ import { FilterMatcher } from "./filter-matcher";
 
 declare const require: any;
 
+const RECOVERY_PROTECTION_MS = 7 * 24 * 60 * 60 * 1000;
+class RecoveryCapacityError extends Error {}
+
 type ScannedFile = {
     relativePath: string;
     absolutePath: string;
@@ -418,14 +421,17 @@ export class ExternalFilterModal extends Modal {
 export class ExternalSyncManagerModal extends Modal {
     private unsubscribe: (() => void) | null = null;
 
-    constructor(app: App, private service: ExternalSyncService) {
+    constructor(app: App, private service: ExternalSyncService, private recoveryBinding?: any) {
         super(app);
     }
 
     onOpen(): void {
         this.titleEl.setText(localize("外部文件夹同步"));
-        this.render();
-        this.unsubscribe = this.service.subscribeStatus(() => this.render());
+        if (this.recoveryBinding) this.openRecovery(this.recoveryBinding);
+        else {
+            this.render();
+            this.unsubscribe = this.service.subscribeStatus(() => this.render());
+        }
     }
 
     onClose(): void {
@@ -452,7 +458,7 @@ export class ExternalSyncManagerModal extends Modal {
                 ? `白名单模式 (${(binding.filterConfig.userRules || []).length} 条规则)`
                 : `排除模式 (${(binding.filterConfig?.userRules || []).length} 条规则)`;
             card.createEl("p", {
-                text: localize("{0} · 筛选: {1} · 待处理 {2} · 冲突 {3} · 可恢复 {4}", localizeMessage(this.service.statusLabel(binding.status)), localizeMessage(filterSummary), binding.pendingCount || 0, (binding.conflicts || []).length, (binding.recoveryItems || []).length),
+                text: localize("{0} · 筛选: {1}", localizeMessage(this.service.statusLabel(binding.status)), localizeMessage(filterSummary)),
             });
             if (binding.lastSuccessAt) card.createEl("p", { text: localize("上次成功：{0}", new Date(binding.lastSuccessAt).toLocaleString()) });
             if (binding.lastError) card.createEl("p", { text: localizeMessage(binding.lastError), cls: "smartmd-warning" });
@@ -479,9 +485,7 @@ export class ExternalSyncManagerModal extends Modal {
                 actions.createEl("button", { text: localize("待确认外写 ") + pendingExports.length + localize(" 篇") }).onclick =
                     () => this.openPendingExports(binding);
             }
-            if ((binding.recoveryItems || []).length) {
-                actions.createEl("button", { text: localize("查看恢复区") }).onclick = () => this.openRecovery(binding);
-            }
+            actions.createEl("button", { text: localize("打开恢复区") }).onclick = () => this.service.openRecovery(binding.id);
             actions.createEl("button", { text: localize("解除此文件夹绑定") }).onclick = async () => {
                 const confirmed = window.confirm(
                     localize("确定解除“{0}”的绑定吗？\n\n只会停止这个文件夹的同步，其他同步文件夹会继续运行。外部原文件夹和知识库内现有副本都会保留。", binding.nickname),
@@ -503,7 +507,7 @@ export class ExternalSyncManagerModal extends Modal {
                 text: localize("保留 {0} 条恢复记录；仅能独立另存，不会重新授权外部同步。", archive.recoveryItems.length),
             });
             card.createEl("button", { text: localize("查看解绑恢复档案") }).onclick =
-                () => this.openRecovery(archive);
+                () => this.service.openRecovery(archive.id);
         }
     }
 
@@ -600,29 +604,41 @@ export class ExternalSyncManagerModal extends Modal {
 
     private openRecovery(binding: any): void {
         this.contentEl.empty();
-        this.contentEl.createEl("h3", { text: localize("{0} · 7 天恢复区", binding.nickname) });
+        this.contentEl.createEl("h3", { text: localize("{0} · 恢复区", binding.nickname) });
         if (binding.detached === true) {
             this.contentEl.createEl("p", {
                 text: localize("已解绑：只允许将恢复记录另存为独立笔记，不会恢复原外部路径的写入或同步权限。"),
                 cls: "smartmd-warning",
             });
         }
-        for (const item of binding.recoveryItems || []) {
+        const items = [...(binding.recoveryItems || [])].sort((a, b) => b.deletedAt - a.deletedAt);
+        if (!items.length) this.contentEl.createEl("p", { text: localize("此文件夹暂无恢复版本。") });
+        for (const item of items) {
             const card = this.contentEl.createDiv({ cls: "smartmd-card" });
             card.createEl("strong", { text: item.relativePath });
-            card.createEl("p", { text: `${item.source === "external" ? "外部来源" : "知识库来源"} · ${new Date(item.deletedAt).toLocaleString()}` });
-            if (!item.restoredAt && !item.exportedAt) {
-                card.createEl("button", { text: localize("另存恢复副本（不覆盖）") }).onclick = async () => {
+            const source = localize(item.source === "external" ? "外部来源" : "知识库来源");
+            card.createEl("p", { text: source + " · " + new Date(item.deletedAt).toLocaleString() +
+                (item.storage === "local-v1" ? "" : " · " + localize("旧版档案")) });
+            const preview = card.createEl("pre", { attr: { hidden: "" } });
+            card.createEl("button", { text: localize("预览版本") }).onclick = async () => {
+                if (!preview.hidden) { preview.hidden = true; return; }
+                try {
+                    preview.setText(await this.service.previewRecovery(binding.id, item.id));
+                    preview.hidden = false;
+                } catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
+            };
+            if (!item.exportedAt) {
+                card.createEl("button", { text: localize("另存恢复副本（不覆盖）"), cls: "mod-cta" }).onclick = async () => {
                     try {
                         const location = await this.service.exportRecoveryToNewNote(binding.id, item.id);
                         new Notice(localize("已安全另存到：") + location);
-                        this.render();
+                        this.openRecovery(binding);
                     } catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                 };
             }
-            if (!item.restoredAt && !item.exportedAt && binding.detached !== true) {
-                card.createEl("button", { text: localize("恢复到两端"), cls: "mod-cta" }).onclick = async () => {
-                    try { await this.service.restore(binding.id, item.id); this.render(); }
+            if (binding.detached !== true) {
+                card.createEl("button", { text: localize("恢复到原位置") }).onclick = async () => {
+                    try { await this.service.restore(binding.id, item.id); this.openRecovery(binding); }
                     catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                 };
             } else if (item.restoredAt || item.exportedAt) {
@@ -631,13 +647,13 @@ export class ExternalSyncManagerModal extends Modal {
                 if (!item.resolvedAt) {
                     card.createEl("button", { text: localize("确认恢复问题已解决") }).onclick = async () => {
                         if (!window.confirm(localize("已逐项核验外部和知识库两端内容？确认后仍保留 7 天安全缓冲。"))) return;
-                        try { await this.service.confirmRecoveryResolved(binding.id, item.id); this.render(); }
+                        try { await this.service.confirmRecoveryResolved(binding.id, item.id); this.openRecovery(binding); }
                         catch (e: any) { new Notice(localizeMessage(String(e.message || e)), 8000); }
                     };
                 }
             }
         }
-        this.contentEl.createEl("button", { text: localize("返回") }).onclick = () => this.render();
+        this.contentEl.createEl("button", { text: localize("关闭") }).onclick = () => this.close();
     }
 }
 
@@ -647,6 +663,9 @@ export class ExternalSyncService {
     private running = new Set<string>();
     private syncJobs = new Map<string, Promise<void>>();
     private authority = new OperationAuthority();
+    private recoveryQueue = Promise.resolve();
+    private pinnedRecoveries = new Set<any>();
+    private recoveryTickets = new WeakSet<RunTicket>();
 
     constructor(private app: App, private store: SmartMDStore) {
         if (!Platform.isDesktopApp) return;
@@ -677,6 +696,11 @@ export class ExternalSyncService {
     openManager(): void {
         if (!Platform.isDesktopApp) return;
         new ExternalSyncManagerModal(this.app, this).open();
+    }
+
+    openRecovery(bindingId: string): void {
+        const binding = this.knownBindings().find(entry => entry.id === bindingId);
+        if (binding) new ExternalSyncManagerModal(this.app, this, binding).open();
     }
 
     openAddBinding(onAdded?: () => void): void {
@@ -1205,7 +1229,6 @@ export class ExternalSyncService {
         for (const binding of this.bindings()) {
             if (this.canRun(binding)) await this.syncBinding(binding);
         }
-        await this.purgeExpiredRecovery();
     }
 
     async syncBinding(binding: any): Promise<void> {
@@ -1283,6 +1306,8 @@ export class ExternalSyncService {
             const next: Record<string, any> = partial;
             binding.pendingCount = allPaths.size;
             let protectedDeletes = 0;
+            let blockedByCapacity = 0;
+            let filesChangedDuringScan = 0;
 
             // 防误删风暴小样本与全量抹除熔断机制 (Circuit Breaker)
             const baselinePaths = Object.keys(previous).filter((p) => previous[p]?.externalHash);
@@ -1303,32 +1328,18 @@ export class ExternalSyncService {
                 const waitingConflict = (binding.conflicts || []).find((item: any) => item.relativePath === relativePath);
                 if (waitingConflict) {
                     const latest = await this.currentPair(binding, relativePath);
-                    if (!this.conflictMatches(waitingConflict, latest)) {
-                        if (!latest.external && !latest.vault) {
-                            binding.conflicts = binding.conflicts.filter((item: any) => item.id !== waitingConflict.id);
-                            delete previous[relativePath];
-                            await this.cleanupConflictCopies(waitingConflict);
-                        } else {
-                            const replacement = await this.makeConflict(
-                                binding,
-                                relativePath,
-                                latest.external?.content ?? null,
-                                latest.vault?.content ?? null,
-                                ticket,
-                            );
-                            await this.cleanupConflictCopies(waitingConflict);
-                            Object.assign(waitingConflict, replacement);
-                        }
+                    if (!latest.external || !latest.vault || !this.conflictMatches(waitingConflict, latest)) {
+                        if (previous[relativePath]) next[relativePath] = previous[relativePath];
+                        filesChangedDuringScan++;
+                        continue;
                     }
-                    binding.status = binding.conflicts.length ? "conflict" : "syncing";
-                    continue;
                 }
                 const ext = external.get(relativePath);
                 const local = vault.get(relativePath);
                 const old = previous[relativePath];
 
                 // Quick stat-based skip MUST happen before any content read or hashing.
-                if (ext && local && old && old.externalHash && old.vaultHash) {
+                if (!waitingConflict && ext && local && old && old.externalHash && old.vaultHash && old.externalHash === old.vaultHash) {
                     const externalStable = old.externalMtimeMs !== undefined &&
                         old.externalMtimeMs === ext.mtimeMs && old.externalSize === ext.size;
                     const localStable = old.vaultMtime !== undefined &&
@@ -1365,7 +1376,7 @@ export class ExternalSyncService {
                         binding.pendingCount = Math.max(0, binding.pendingCount - 1);
                         continue;
                     }
-                    ext.content = await this.fs.promises.readFile(ext.absolutePath, "utf8");
+                    ext.content = await this.readExternalMarkdown(ext.absolutePath);
                     ext.hash = await digest(ext.content);
                 }
                 if (local) {
@@ -1375,52 +1386,63 @@ export class ExternalSyncService {
                 const fresh = await this.currentPair(binding, relativePath);
                 if (!this.isCurrent(binding, ticket)) return;
                 if (!this.samePair(ext, local, fresh)) {
-                    if (
-                        fresh.external
-                        && fresh.vault
-                        && fresh.external.hash !== fresh.vault.hash
-                        && !(binding.conflicts || []).some((item: any) => item.relativePath === relativePath)
-                    ) {
-                        binding.conflicts.push(await this.makeConflict(
-                            binding,
-                            relativePath,
-                            fresh.external.content,
-                            fresh.vault.content,
-                            ticket,
-                        ));
-                        binding.status = "conflict";
-                    }
                     if (old) next[relativePath] = old;
-                    binding.pendingCount = Math.max(0, binding.pendingCount - 1);
+                    filesChangedDuringScan++;
                     continue;
                 }
-                if (ext && local) {
-                    if (ext.hash === local.hash) {
-                        next[relativePath] = {
-                            externalHash: ext.hash,
-                            vaultHash: local.hash,
-                            externalMtimeMs: ext.mtimeMs,
-                            externalSize: ext.size,
-                            vaultMtime: local.mtime,
-                            vaultSize: local.size,
+                try {
+                    if (ext && local) {
+                        let winnerHash = ext.hash;
+                        if (ext.hash !== local.hash) {
+                            const externalChanged = !old || old.externalHash !== ext.hash;
+                            const vaultChanged = !old || old.vaultHash !== local.hash;
+                            const externalWins = waitingConflict || externalChanged === vaultChanged
+                                ? Number(ext.mtimeMs || 0) >= Number(local.mtime || 0)
+                                : externalChanged;
+                            const validate = async () => {
+                            const latest = await this.currentPair(binding, relativePath);
+                            return this.samePair(ext, local, latest) && latest.external?.mtimeMs === ext.mtimeMs &&
+                                latest.vault?.file.stat.mtime === local.mtime;
                         };
-                    } else {
-                        const externalChanged = !old || old.externalHash !== ext.hash;
-                        const vaultChanged = !old || old.vaultHash !== local.hash;
-                        if (!externalChanged && !vaultChanged) {
+                            if (externalWins) {
+                                await this.stageVaultWrite(binding, relativePath, ext.content, ticket, validate);
+                            } else {
+                                winnerHash = local.hash;
+                                await this.atomicWrite(ext.absolutePath, local.content, () => this.isCurrent(binding, ticket),
+                                    validate, () => this.authority.beginFinal(ticket), { binding, relativePath });
+                            }
+                        }
+                        const verified = await this.currentPair(binding, relativePath);
+                        if (verified.external?.hash !== winnerHash || verified.vault?.hash !== winnerHash) {
+                            throw new Error("双端读回版本不一致，已保留备份");
+                        }
+                        next[relativePath] = { externalHash: winnerHash, vaultHash: winnerHash,
+                            externalMtimeMs: verified.external.mtimeMs, externalSize: verified.external.size,
+                            vaultMtime: verified.vault.file.stat.mtime, vaultSize: verified.vault.file.stat.size };
+                        if (waitingConflict) {
+                            (binding.legacyResolvedConflicts ||= []).push(waitingConflict);
+                            binding.conflicts = binding.conflicts.filter((item: any) => item !== waitingConflict);
+                        }
+                    } else if (ext && !local) {
+                        if (old?.pendingDeletion === "vault") {
+                            next[relativePath] = { ...old, externalHash: ext.hash };
+                            protectedDeletes++;
+                        } else if (
+                            old?.externalExists === true
+                            && old?.vaultExists === false
+                            && old.externalHash === ext.hash
+                        ) {
+                            next[relativePath] = old;
+                        } else if (old?.vaultHash) {
+                            // Missing a mirror never authorizes moving the external source.
                             next[relativePath] = {
+                                ...old,
                                 externalHash: ext.hash,
-                                vaultHash: local.hash,
-                                externalMtimeMs: ext.mtimeMs,
-                                externalSize: ext.size,
-                                vaultMtime: local.mtime,
-                                vaultSize: local.size,
+                                vaultHash: "",
+                                pendingDeletion: "vault",
                             };
-                        } else if (externalChanged && vaultChanged) {
-                            binding.conflicts.push(await this.makeConflict(binding, relativePath, ext.content, local.content, ticket));
-                            binding.status = "conflict";
-                            continue;
-                        } else if (externalChanged) {
+                            protectedDeletes++;
+                        } else {
                             await this.stageVaultWrite(
                                 binding,
                                 relativePath,
@@ -1433,93 +1455,45 @@ export class ExternalSyncService {
                                 vaultHash: ext.hash,
                                 externalMtimeMs: ext.mtimeMs,
                                 externalSize: ext.size,
-                                vaultMtime: local.file.stat?.mtime,
-                                vaultSize: local.file.stat?.size,
-                            };
-                        } else {
-                            await this.atomicWrite(
-                                ext.absolutePath,
-                                local.content,
-                                () => this.isCurrent(binding, ticket),
-                                async () => this.samePair(ext, local, await this.currentPair(binding, relativePath)),
-                                () => this.authority.beginFinal(ticket),
-                                { binding, relativePath },
-                            );
-                            next[relativePath] = {
-                                externalHash: local.hash,
-                                vaultHash: local.hash,
-                                externalMtimeMs: ext.mtimeMs,
-                                externalSize: ext.size,
-                                vaultMtime: local.mtime,
-                                vaultSize: local.size,
                             };
                         }
-                    }
-                } else if (ext && !local) {
-                    if (old?.pendingDeletion === "vault") {
-                        next[relativePath] = { ...old, externalHash: ext.hash };
-                        protectedDeletes++;
-                    } else if (
-                        old?.externalExists === true
-                        && old?.vaultExists === false
-                        && old.externalHash === ext.hash
-                    ) {
-                        next[relativePath] = old;
-                    } else if (old?.vaultHash) {
-                        // Missing a mirror never authorizes moving the external source.
-                        next[relativePath] = {
-                            ...old,
-                            externalHash: ext.hash,
-                            vaultHash: "",
-                            pendingDeletion: "vault",
-                        };
-                        protectedDeletes++;
-                    } else {
-                        await this.stageVaultWrite(
-                            binding,
-                            relativePath,
-                            ext.content,
-                            ticket,
-                            async () => this.samePair(ext, local, await this.currentPair(binding, relativePath)),
-                        );
-                        next[relativePath] = {
-                            externalHash: ext.hash,
-                            vaultHash: ext.hash,
-                            externalMtimeMs: ext.mtimeMs,
-                            externalSize: ext.size,
-                        };
-                    }
-                } else if (!ext && local) {
-                    if (
-                        old?.externalExists === false
-                        && old?.vaultExists === true
-                        && old.vaultHash === local.hash
-                    ) {
-                        next[relativePath] = old;
-                    } else if (old?.protectedDelete === "external") {
-                        next[relativePath] = { ...old, vaultHash: local.hash };
-                        protectedDeletes++;
-                    } else if (old?.externalHash) {
-                        await this.createRecovery(binding, relativePath, local.content, "vault");
-                        next[relativePath] = {
-                            externalHash: "",
-                            vaultHash: local.hash,
-                            protectedDelete: "external",
-                        };
-                        protectedDeletes++;
-                    } else {
-                        // 落实 P1-DEC-05: 知识库新建无基线 Markdown 必须挂起为 pendingExport，严禁静默外写
-                        // 但若该文件已被规则排除（!FilterMatcher.isFileAccepted），则是 UNTRACKED_LOCAL，严禁标记 pendingExport！
-                        if (FilterMatcher.isFileAccepted(relativePath, binding.filterConfig)) {
+                    } else if (!ext && local) {
+                        if (
+                            old?.externalExists === false
+                            && old?.vaultExists === true
+                            && old.vaultHash === local.hash
+                        ) {
+                            next[relativePath] = old;
+                        } else if (old?.protectedDelete === "external") {
+                            next[relativePath] = { ...old, vaultHash: local.hash };
+                            protectedDeletes++;
+                        } else if (old?.externalHash) {
+                            await this.createRecovery(binding, relativePath, local.content, "vault");
                             next[relativePath] = {
                                 externalHash: "",
                                 vaultHash: local.hash,
-                                pendingExport: true,
-                                vaultMtime: local.mtime,
-                                vaultSize: local.size,
+                                protectedDelete: "external",
                             };
+                            protectedDeletes++;
+                        } else {
+                            // 落实 P1-DEC-05: 知识库新建无基线 Markdown 必须挂起为 pendingExport，严禁静默外写
+                            // 但若该文件已被规则排除（!FilterMatcher.isFileAccepted），则是 UNTRACKED_LOCAL，严禁标记 pendingExport！
+                            if (FilterMatcher.isFileAccepted(relativePath, binding.filterConfig)) {
+                                next[relativePath] = {
+                                    externalHash: "",
+                                    vaultHash: local.hash,
+                                    pendingExport: true,
+                                    vaultMtime: local.mtime,
+                                    vaultSize: local.size,
+                                };
+                            }
                         }
                     }
+                } catch (error) {
+                    if (!(error instanceof RecoveryCapacityError)) throw error;
+                    if (old) next[relativePath] = old;
+                    blockedByCapacity++;
+                    continue;
                 }
                 if (next[relativePath] && next[relativePath] !== old) {
                     next[relativePath].lastDeepHashAt = Date.now();
@@ -1530,8 +1504,10 @@ export class ExternalSyncService {
             }
             if (!this.isCurrent(binding, ticket)) return;
             binding.fileStates = next;
-            binding.lastSuccessAt = Date.now();
-            binding.lastError = protectedDeletes
+            if (!blockedByCapacity && !filesChangedDuringScan) binding.lastSuccessAt = Date.now();
+            binding.lastError = blockedByCapacity ? localize("恢复区已满，已跳过 {0} 个需要备份的文件。", blockedByCapacity)
+                : filesChangedDuringScan ? localize("有 {0} 个文件的版本尚未核实，已保留现有文件。", filesChangedDuringScan)
+                : protectedDeletes
                 ? `${protectedDeletes} 项外部删除已停在恢复保护边界，知识库与 OneDrive 内容均未删除。`
                 : "";
             binding.status = (binding.conflicts || []).length ? "conflict" : "active";
@@ -1726,6 +1702,10 @@ export class ExternalSyncService {
     async resume(id: string): Promise<void> {
         const binding = this.bindings().find((item) => item.id === id);
         if (!binding) return;
+        if (binding.recoveryInProgress) {
+            new Notice(localize("请在恢复区继续上次未完成的恢复。"));
+            return;
+        }
         // A resume button is not an authorization grant for an unconfirmed
         // legacy binding or a source/target scope that changed.
         const approvedScope = `${binding.externalPath}|${binding.targetPath}`;
@@ -2184,34 +2164,135 @@ export class ExternalSyncService {
         }
     }
 
-    private async createRecovery(binding: any, relativePath: string, content: string, source: "external" | "vault"): Promise<any> {
-        const recoveryItems = (binding.recoveryItems || []) as any[];
-        const backupBytes = recoveryItems.reduce((total: number, item: any) =>
-            total + Number(item.contentBytes || 0), 0);
-        const contentBytes = new TextEncoder().encode(content).byteLength;
-        if (recoveryItems.length >= 5000 || backupBytes + contentBytes > 512 * 1024 * 1024) {
-            throw new Error("恢复档案已达容量上限，请核验导出后再继续写入");
+    private recoveryScope(binding: any): string {
+        return this.pathKey(binding.canonicalExternalPath || binding.externalPath);
+    }
+
+    private async recoveryDirectory(binding: any, create: boolean): Promise<string> {
+        const base = process.env.LOCALAPPDATA;
+        const vault = (this.app.vault.adapter as { getBasePath?: () => string }).getBasePath?.();
+        if (!base || !this.path.isAbsolute(base) || !vault) throw new Error("恢复区位置不可用");
+        const local = await this.fs.promises.realpath(base);
+        const vaultRoot = await this.fs.promises.realpath(vault);
+        const scope = this.recoveryScope(binding);
+        const key = await digest(JSON.stringify([this.pathKey(vaultRoot), scope, binding.bindingId || binding.id]));
+        const root = this.path.join(local, "SmartMD", "Recovery", key);
+        if ([vaultRoot, scope, binding.externalPath].some(dir => inside(dir, root, this.path))) {
+            throw new Error("恢复区必须位于两个同步目录之外");
         }
-        const recoveryId = uid("recovery");
-        const storagePath = normalizePath(`.suite-recovery/deletions/${binding.id}/${recoveryId}.md`);
-        const deletedAt = Date.now();
-        await this.createHiddenMarkdown(storagePath, content);
-        // Retention begins only after the hidden recovery bytes are verified.
-        const verifiedAt = Date.now();
-        const item = {
-            id: recoveryId,
-            relativePath,
-            source,
-            deletedAt,
-            expiresAt: verifiedAt + 7 * 24 * 60 * 60 * 1000,
-            storagePath,
-            verifiedAt,
-            contentHash: await digest(content),
-            contentBytes,
-            resolvedAt: 0,
-        };
-        binding.recoveryItems.push(item);
-        await (this.store as any).save();
+        let dir = local;
+        for (const part of ["SmartMD", "Recovery", key]) {
+            dir = this.path.join(dir, part);
+            if (create) await this.fs.promises.mkdir(dir).catch((error: NodeJS.ErrnoException) => {
+                if (error.code !== "EEXIST") throw error;
+            });
+            const stat = await this.fs.promises.lstat(dir);
+            if (!stat.isDirectory() || stat.isSymbolicLink() ||
+                this.pathKey(await this.fs.promises.realpath(dir)) !== this.pathKey(dir)) {
+                throw new Error("恢复区目录遇到链接或路径变化");
+            }
+        }
+        return root;
+    }
+
+    private recoveryFileName(binding: any, id: string): string {
+        const owner = String(binding.bindingId || binding.id || "");
+        if (!/^[a-zA-Z0-9_-]+$/.test(owner) || !/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("恢复路径身份不可信");
+        return owner + "_" + id + ".md";
+    }
+
+    private async readRecoveryContent(binding: any, item: any): Promise<string> {
+        const id = String(item.id || "");
+        const owner = String(binding.bindingId || binding.id || "");
+        const name = this.recoveryFileName(binding, id);
+        if (!/^[a-f0-9]{64}$/i.test(String(item.contentHash || ""))) {
+            throw new Error("旧恢复记录缺少可信SHA-256，保留原档案并拒绝危险恢复");
+        }
+        let content: string;
+        if (item.storage === "local-v1") {
+            if (item.storagePath !== name) throw new Error("恢复路径身份不可信");
+            const file = this.path.join(await this.recoveryDirectory(binding, false), name);
+            const stat = await this.fs.promises.lstat(file);
+            if (!stat.isFile() || stat.isSymbolicLink() ||
+                this.pathKey(await this.fs.promises.realpath(file)) !== this.pathKey(file)) throw new Error("恢复路径身份不可信");
+            content = await this.fs.promises.readFile(file, "utf8");
+        } else {
+            if (item.storage || item.storagePath !== ".suite-recovery/deletions/" + owner + "/" + id + ".md") {
+                throw new Error("恢复路径身份不可信");
+            }
+            content = await this.readHiddenMarkdown(item.storagePath);
+        }
+        if (await digest(content) !== item.contentHash) throw new Error("恢复档案哈希校验失败");
+        return content;
+    }
+
+    async previewRecovery(bindingId: string, recoveryId: string): Promise<string> {
+        const binding = this.knownBindings().find(entry => entry.id === bindingId || entry.bindingId === bindingId);
+        const item = binding?.recoveryItems?.find((entry: any) => entry.id === recoveryId);
+        if (!item) throw new Error("恢复记录不存在");
+        return this.readRecoveryContent(binding, item);
+    }
+
+    private createRecovery(binding: any, relativePath: string, content: string, source: "external" | "vault", overwrite = false): Promise<any> {
+        const job = this.recoveryQueue.then(() => this.writeRecovery(binding, relativePath, content, source, overwrite));
+        this.recoveryQueue = job.then(() => undefined, () => undefined);
+        return job;
+    }
+
+    private async writeRecovery(binding: any, relativePath: string, content: string, source: "external" | "vault", overwrite: boolean): Promise<any> {
+        if (!this.knownBindings().includes(binding)) throw new Error("恢复档案绑定已变化");
+        const records: any[] = binding.recoveryItems ||= [];
+        const contentHash = await digest(content);
+        const duplicate = records.find((item: any) => item.storage === "local-v1" &&
+            item.relativePath === relativePath && item.contentHash === contentHash);
+        if (duplicate) {
+            await this.readRecoveryContent(binding, duplicate);
+            if (!overwrite) duplicate.protected = true;
+            await this.store.save();
+            return duplicate;
+        }
+        const root = await this.recoveryDirectory(binding, true);
+        const maxBytes = 512 * 1024 * 1024;
+        const contentBytes = new TextEncoder().encode(content).byteLength;
+        if (contentBytes > maxBytes) throw new RecoveryCapacityError("恢复区已满");
+        const entries: string[] = await this.fs.promises.readdir(root);
+        let count = entries.length;
+        let bytes = 0;
+        for (const entry of entries) {
+            const stat = await this.fs.promises.lstat(this.path.join(root, entry));
+            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("恢复区目录存在无法核验的文件");
+            bytes += stat.size;
+        }
+        if (count >= 100 || bytes + contentBytes > maxBytes) {
+            const eligible = records.map((item: any) => ({ owner: binding, item }))
+                .filter(({ item }) => item.storage === "local-v1" && !this.pinnedRecoveries.has(item) && !item.protected && item.replacedAt &&
+                    Math.max(item.replacedAt, item.verifiedAt) + RECOVERY_PROTECTION_MS <= Date.now())
+                .sort((a, b) => a.item.verifiedAt - b.item.verifiedAt);
+            const retiring: typeof eligible = [];
+            for (const entry of eligible) {
+                if (count < 100 && bytes + contentBytes <= maxBytes) break;
+                if (!entries.includes(entry.item.storagePath)) continue;
+                const stored = await this.readRecoveryContent(entry.owner, entry.item);
+                bytes -= new TextEncoder().encode(stored).byteLength;
+                count--;
+                retiring.push(entry);
+            }
+            if (count >= 100 || bytes + contentBytes > maxBytes) throw new RecoveryCapacityError("恢复区已满");
+            for (const { owner, item } of retiring) {
+                await this.readRecoveryContent(owner, item);
+                await this.fs.promises.unlink(this.path.join(root, item.storagePath));
+                owner.recoveryItems.splice(owner.recoveryItems.indexOf(item), 1);
+                await this.store.save();
+            }
+        }
+        const id = uid("recovery");
+        const storagePath = this.recoveryFileName(binding, id);
+        await this.fs.promises.writeFile(this.path.join(root, storagePath), content, { encoding: "utf8", flag: "wx" });
+        const item = { id, relativePath, source, deletedAt: Date.now(), storagePath, storage: "local-v1",
+            verifiedAt: Date.now(), contentHash, contentBytes, protected: !overwrite };
+        await this.readRecoveryContent(binding, item);
+        records.push(item);
+        await this.store.save();
         return item;
     }
 
@@ -2220,9 +2301,23 @@ export class ExternalSyncService {
             item.id === bindingId || item.bindingId === bindingId);
         const item = binding?.recoveryItems?.find((entry: any) => entry.id === recoveryId);
         if (!binding || !item) return;
+        if (this.syncJobs.has(binding.id) || this.running.has(binding.id)) throw new Error("同步正在运行，请稍后恢复");
+        this.pinnedRecoveries.add(item);
+        const job = this.performRestore(binding, item);
+        this.syncJobs.set(binding.id, job);
+        try { await job; } finally {
+            this.pinnedRecoveries.delete(item);
+            if (this.syncJobs.get(binding.id) === job) this.syncJobs.delete(binding.id);
+        }
+    }
+
+    private async performRestore(binding: any, item: any): Promise<void> {
         // Approval for one recovery file must never renew an unconfirmed,
         // paused, detached or scope-changed binding's ongoing sync license.
-        if (!this.canRun(binding)) {
+        if (binding.recoveryInProgress && binding.recoveryInProgress !== item.id) {
+            throw new Error(localize("请在恢复区继续上次未完成的恢复。"));
+        }
+        if (!this.bindingAuthorized(binding)) {
             binding.lastError = "绑定没有有效的当前同步授权，已保留恢复档案；请重新确认绑定范围。";
             await (this.store as any).save();
             throw new Error(binding.lastError);
@@ -2234,83 +2329,78 @@ export class ExternalSyncService {
             await (this.store as any).save();
             throw new Error(binding.lastError);
         }
-        const ownerId = String(binding.bindingId || binding.id || "");
-        const itemId = String(item.id || "");
-        const expectedPath = ".suite-recovery/deletions/" + ownerId + "/" + itemId + ".md";
-        // Keep old records without a verifiable hash; do not restore their bytes.
-        if (!item.contentHash || !/^[a-f0-9]{64}$/i.test(String(item.contentHash))) {
-            throw new Error("旧恢复记录缺少可信SHA-256，保留原档案并拒绝危险恢复");
-        }
-        if (!/^[a-zA-Z0-9_-]+$/.test(ownerId) ||
-            !/^[a-zA-Z0-9_-]+$/.test(itemId) ||
-            item.storagePath !== expectedPath) throw new Error("恢复路径身份不可信");
-        const content = await this.readHiddenMarkdown(item.storagePath);
-        const storedHash = await digest(content);
-        if (item.contentHash !== storedHash) throw new Error("恢复档案哈希校验失败");
-        const current = await this.currentPair(binding, item.relativePath);
-        if (
-            (current.external && current.external.hash !== storedHash)
-            || (current.vault && current.vault.hash !== storedHash)
-        ) {
-            binding.lastError = "恢复目标已有其他版本，未覆盖并保留待恢复记录。";
-            await (this.store as any).save();
-            throw new Error(binding.lastError);
-        }
-        const approved = typeof window !== "undefined" && typeof window.confirm === "function"
-            && window.confirm(localize("确认将“{0}”恢复到外部文件夹和知识库副本吗？", item.relativePath));
-        if (!approved) return;
-        // The above confirmation applies only to this recovery request.
-        // It never creates or extends the binding's persistent run license.
-        if (!this.canRun(binding)) throw new Error("恢复操作授权已失效，未写入任何目标");
-        // Freeze BOTH targets across the confirmation dialog. In particular,
-        // an external file created while the user reviews this dialog must
-        // never be overwritten by an old recovery preview.
+        const content = await this.readRecoveryContent(binding, item);
+        const storedHash = item.contentHash;
+        const relativePath = item.relativePath;
+        if (!FilterMatcher.isFileAccepted(relativePath, binding.filterConfig)) throw new Error("恢复目标已被当前同步规则排除");
+        await this.assertBindingRoot(binding);
+        const current = await this.currentPair(binding, relativePath);
+        if (!window.confirm(localize("恢复“{0}”到两端原位置？现有版本会先保存到恢复区。", relativePath))) return;
+        if (!this.bindingAuthorized(binding)) throw new Error("恢复操作授权已失效，未写入任何目标");
         const approvedExternal = current.external || undefined;
         let approvedVault = current.vault || undefined;
-        const validateRecoverySnapshot = async (): Promise<boolean> => {
-            const latest = await this.currentPair(binding, item.relativePath);
-            if (!this.samePair(approvedExternal, approvedVault, latest)) return false;
-            // currentPair's Vault cache can be stale: verify actual bytes too.
-            if (latest.vault &&
-                await digest(await this.app.vault.read(latest.vault.file)) !== approvedVault?.hash) return false;
-            return true;
-        };
-        if (!(await validateRecoverySnapshot())) {
-            throw new Error("恢复目标在用户确认期间发生变化，已拒绝覆盖并保留恢复档案");
-        }
-        const ticket = this.authority.start(binding);
+        const validate = async () => this.samePair(approvedExternal, approvedVault, await this.currentPair(binding, relativePath));
+        if (!(await validate())) throw new Error("恢复目标在用户确认期间发生变化，已拒绝覆盖并保留恢复档案");
+        const ticket = this.authority.start(binding, binding.externalPath + "|" + binding.targetPath);
+        this.recoveryTickets.add(ticket);
+        const displaced: any[] = [];
         try {
-            if (!current.vault) {
-                await this.stageVaultWrite(binding, item.relativePath, content, ticket, validateRecoverySnapshot);
-                const afterVaultWrite = await this.currentPair(binding, item.relativePath);
-                if (!afterVaultWrite.vault || afterVaultWrite.vault.hash !== storedHash ||
-                    (approvedExternal ? afterVaultWrite.external?.hash !== approvedExternal.hash
-                        : afterVaultWrite.external !== null) ||
-                    await digest(await this.app.vault.read(afterVaultWrite.vault.file)) !== storedHash) {
+            // Preflight both backups before the first write to either side.
+            if (approvedExternal && approvedExternal.hash !== storedHash) {
+                const backup = await this.createRecovery(binding, relativePath, approvedExternal.content, "external", true);
+                this.pinnedRecoveries.add(backup);
+                displaced.push(backup);
+            }
+            if (approvedVault && approvedVault.hash !== storedHash) {
+                const backup = await this.createRecovery(binding, relativePath, approvedVault.content, "vault", true);
+                this.pinnedRecoveries.add(backup);
+                displaced.push(backup);
+            }
+            if (!(await validate())) throw new Error("恢复目标在用户确认期间发生变化，已拒绝覆盖并保留恢复档案");
+            binding.recoveryInProgress = item.id;
+            await this.store.save();
+            this.authority.require(ticket);
+            if (approvedVault?.hash !== storedHash) {
+                await this.stageVaultWrite(binding, relativePath, content, ticket, validate);
+                const after = await this.currentPair(binding, relativePath);
+                if (after.vault?.hash !== storedHash || after.external?.hash !== approvedExternal?.hash) {
                     throw new Error("恢复中目标版本发生变化，已保留恢复档案");
                 }
-                approvedVault = afterVaultWrite.vault;
+                approvedVault = after.vault || undefined;
             }
-            if (!current.external) {
-                await this.atomicWrite(
-                    this.path.join(binding.externalPath, ...item.relativePath.split("/")),
-                    content,
-                    () => this.isCurrent(binding, ticket),
-                    validateRecoverySnapshot,
-                    () => this.authority.beginFinal(ticket),
-                );
+            if (approvedExternal?.hash !== storedHash) {
+                await this.atomicWrite(this.path.join(binding.externalPath, ...relativePath.split("/")),
+                    content, () => this.isCurrent(binding, ticket), validate, () => this.authority.beginFinal(ticket),
+                    { binding, relativePath });
             }
-            binding.fileStates = binding.fileStates || {};
-            binding.fileStates[item.relativePath] = { externalHash: storedHash, vaultHash: storedHash };
-            const verified = await this.currentPair(binding, item.relativePath);
-            if (!verified.vault || !verified.external ||
-                verified.vault.hash !== storedHash || verified.external.hash !== storedHash) {
+            const verified = await this.currentPair(binding, relativePath);
+            if (verified.vault?.hash !== storedHash || verified.external?.hash !== storedHash) {
                 throw new Error("恢复后读回不一致；已保留恢复记录");
             }
+            const previousState = binding.fileStates?.[relativePath];
+            (binding.fileStates ||= {})[relativePath] = { externalHash: storedHash, vaultHash: storedHash };
+            const previousRestoredAt = item.restoredAt;
             item.restoredAt = Date.now();
+            delete binding.recoveryInProgress;
+            binding.status = "active";
             binding.lastError = "";
-            await (this.store as any).save();
+            try { await this.store.save(); } catch (error) {
+                if (previousState) binding.fileStates[relativePath] = previousState;
+                else delete binding.fileStates[relativePath];
+                item.restoredAt = previousRestoredAt;
+                binding.recoveryInProgress = item.id;
+                throw error;
+            }
+        } catch (error) {
+            if (binding.recoveryInProgress === item.id) {
+                binding.status = "paused";
+                binding.lastError = localize("恢复未完整完成，已暂停同步并保留两端备份。");
+                await this.store.save();
+            }
+            throw error;
         } finally {
+            for (const backup of displaced) this.pinnedRecoveries.delete(backup);
+            this.recoveryTickets.delete(ticket);
             this.authority.finishFinal(ticket);
         }
     }
@@ -2319,16 +2409,7 @@ export class ExternalSyncService {
         const binding = this.knownBindings().find((b: any) => b.id === bindingId || b.bindingId === bindingId);
         const item = binding?.recoveryItems?.find((r: any) => r.id === recoveryId);
         if (!item) throw new Error("恢复记录不存在");
-        const ownerId = String(binding.bindingId || binding.id || "");
-        const itemId = String(item.id || "");
-        const expectedPath = ".suite-recovery/deletions/" + ownerId + "/" + itemId + ".md";
-        if (!/^[a-zA-Z0-9_-]+$/.test(ownerId) ||
-            !/^[a-zA-Z0-9_-]+$/.test(itemId) ||
-            item.storagePath !== expectedPath) throw new Error("恢复路径身份不可信");
-        const content = await this.readHiddenMarkdown(item.storagePath);
-        if (!item.contentHash || await digest(content) !== item.contentHash) {
-            throw new Error("恢复文件哈希不符，拒绝导出");
-        }
+        const content = await this.readRecoveryContent(binding, item);
         const folder = normalizePath("恢复的外部笔记");
         const safePart = safeName(this.path.basename(item.relativePath)).replace(/\.md$/i, "");
         const output = normalizePath(folder + "/" + safePart + "-" + item.id + ".md");
@@ -2414,11 +2495,15 @@ export class ExternalSyncService {
     private isCurrent(binding: any, ticket: RunTicket): boolean {
         return this.authority.isCurrent(ticket)
             && ticket.state === binding
-            && this.canRun(binding)
+            && (this.canRun(binding) || this.recoveryTickets.has(ticket) && this.bindingAuthorized(binding))
             && this.knownBindings().includes(binding);
     }
 
     private canRun(binding: any): boolean {
+        return !binding.recoveryInProgress && this.bindingAuthorized(binding);
+    }
+
+    private bindingAuthorized(binding: any): boolean {
         return this.authority.canRun(binding)
             && binding.confirmationScope === `${binding.externalPath}|${binding.targetPath}`;
     }
@@ -2457,7 +2542,7 @@ export class ExternalSyncService {
         if (!root?.isDirectory()) throw new Error("外部同步根目录不可访问");
         await this.assertSafeExternalRelativePath(binding, relativePath);
         const absolutePath = this.path.join(binding.externalPath, ...relativePath.split("/"));
-        const externalContent = await this.fs.promises.readFile(absolutePath, "utf8").catch((error: any) => {
+        const externalContent = await this.readExternalMarkdown(absolutePath).catch((error: any) => {
             if (error?.code === "ENOENT") return null;
             throw error;
         });
@@ -2466,11 +2551,12 @@ export class ExternalSyncService {
             absolutePath,
             content: externalContent,
             hash: await digest(externalContent),
+            ...await this.fs.promises.stat(absolutePath).then((stat: any) => ({ mtimeMs: Math.floor(stat.mtimeMs), size: stat.size })),
         };
         const vaultPath = normalizePath(`${binding.targetPath}/${relativePath}`);
         const file = this.app.vault.getAbstractFileByPath(vaultPath);
         const vault = file instanceof TFile
-            ? await this.app.vault.cachedRead(file).then(async (content: string) => ({
+            ? await this.app.vault.read(file).then(async (content: string) => ({
                 file,
                 content,
                 hash: await digest(content),
@@ -2491,101 +2577,24 @@ export class ExternalSyncService {
             && (expectedVault ? current.vault?.hash === expectedVault.hash : current.vault === null);
     }
 
-    private async purgeExpiredRecovery(): Promise<void> {
-        for (const binding of this.knownBindings()) {
-            const retained: any[] = [];
-            for (const item of binding.recoveryItems || []) {
-                // Old records may have an expiry earlier than verified readback t0.
-                const verifiedStart = Number(item.verifiedAt || item.deletedAt || 0);
-                const expiresAt = Math.max(
-                    Number(item.expiresAt || 0), verifiedStart + 7 * 24 * 60 * 60 * 1000,
-                );
-                const now = Date.now();
-                const sixDays = 6 * 24 * 60 * 60 * 1000;
-                const month = 30 * 24 * 60 * 60 * 1000;
-                if (Number(item.deletedAt || 0) > 0 &&
-                    now >= Number(item.deletedAt) + sixDays &&
-                    (!item.lastReminderAt ||
-                        (now >= expiresAt && now - Number(item.lastReminderAt) >= month))) {
-                    item.lastReminderAt = now;
-                    new Notice(localize("外部同步恢复档案待处理：") + String(item.relativePath || "未知文件") +
-                        localize("。未确认解决前不会自动销毁，请在恢复区核查。"), 9000);
-                }
-                const resolvedAt = Number(item.resolvedAt || 0);
-                const bufferUntil = resolvedAt + 7 * 24 * 60 * 60 * 1000;
-                if (!resolvedAt || !item.verifiedAt || !(item.restoredAt || item.exportedAt) ||
-                    expiresAt > Date.now() || bufferUntil > Date.now() ||
-                    Date.now() < Number(item.deletedAt || 0)) {
-                    retained.push(item);
-                    continue;
-                }
-                try {
-                    const ownerId = String(binding.bindingId || binding.id || "");
-                    const recoveryId = String(item.id || "");
-                    const safeVaultPrefix = ".suite-recovery/deletions/" + ownerId + "/";
-                    if (!/^[a-zA-Z0-9_-]+$/.test(ownerId) ||
-                        !/^[a-zA-Z0-9_-]+$/.test(recoveryId) ||
-                        item.storagePath !== safeVaultPrefix + recoveryId + ".md" ||
-                        !item.contentHash || !/^[a-f0-9]{64}$/i.test(String(item.contentHash))) {
-                        throw new Error("恢复记录路径或可信哈希缺失，保留档案禁止自动清理");
-                    }
-                    // Verify actual hidden bytes before any physical backup removal.
-                    const stored = await this.readHiddenMarkdown(item.storagePath);
-                    if (await digest(stored) !== item.contentHash) {
-                        throw new Error("隐藏恢复原文哈希不符，保留档案");
-                    }
-                    // Old "exported" or "restored" flags are not evidence that
-                    // a current, readable replacement copy still exists.
-                    let safeCopyVerified = false;
-                    const exportPath = String(item.exportPath || "");
-                    if (item.exportedAt && exportPath.startsWith("恢复的外部笔记/") &&
-                        !exportPath.includes("\\") &&
-                        exportPath.split("/").every((part: string) => part && part !== "." && part !== "..")) {
-                        const exported = this.app.vault.getAbstractFileByPath(exportPath);
-                        if (exported instanceof TFile &&
-                            await digest(await this.app.vault.read(exported)) === item.contentHash) {
-                            safeCopyVerified = true;
-                        }
-                    }
-                    if (!safeCopyVerified && item.restoredAt) {
-                        const pair = await this.currentPair(binding, item.relativePath);
-                        safeCopyVerified = pair.external?.hash === item.contentHash &&
-                            pair.vault?.hash === item.contentHash;
-                    }
-                    if (!safeCopyVerified) {
-                        throw new Error("已恢复/导出的有效副本无法重新读回，保留恢复档案");
-                    }
-                    if (item.externalBackupPath) {
-                        const backupPath = this.path.resolve(item.externalBackupPath);
-                        const parent = this.path.dirname(backupPath);
-                        if (this.path.basename(parent).toLowerCase() !== ".smartkeep-recovery" ||
-                            !inside(binding.externalPath, backupPath, this.path) ||
-                            this.pathKey(backupPath) === this.pathKey(binding.externalPath)) {
-                            throw new Error("外部备份目录身份不可信，拒绝清理");
-                        }
-                        const backupContent = await this.fs.promises.readFile(backupPath, "utf8");
-                        if (await digest(backupContent) !== item.contentHash) {
-                            throw new Error("外部恢复备份字节不符，保留档案");
-                        }
-                        await this.fs.promises.unlink(backupPath);
-                    }
-                    const indexedCopy = this.app.vault.getAbstractFileByPath(item.storagePath);
-                    if (!(indexedCopy instanceof TFile) &&
-                        !(await this.app.vault.adapter.exists(item.storagePath))) {
-                        throw new Error("恢复原文件已缺失，保留恢复条目待核验");
-                    }
-                    await this.removeHiddenMarkdown(item.storagePath);
-                } catch (error: any) {
-                    item.cleanupError = `到期恢复内容清理失败，将自动重试：${String(error.message || error)}`;
-                    binding.lastError = item.cleanupError;
-                    retained.push(item);
-                }
-            }
-            binding.recoveryItems = retained;
-        }
-        const local = (this.store as any).settings.local;
-        local.externalRecoveryArchives = this.recoveryArchives().filter((item: any) => (item.recoveryItems || []).length);
-        await (this.store as any).save();
+    private async readExternalMarkdown(file: string): Promise<string> {
+        const bytes: Uint8Array = await this.fs.promises.readFile(file);
+        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    }
+
+    private async replaceExternalWithBackup(staged: string, target: string, backup: string): Promise<void> {
+        const systemRoot = process.env.SystemRoot;
+        if (!Platform.isWin || !systemRoot || !this.path.isAbsolute(systemRoot)) throw new Error("Windows 文件安全替换不可用");
+        const executable = this.path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+        const script = "$ErrorActionPreference = 'Stop'; [IO.File]::Replace($env:SMARTMD_STAGED, $env:SMARTMD_TARGET, $env:SMARTMD_BACKUP)";
+        const encoded = Buffer.from(script, "utf16le").toString("base64");
+        const execFile = (require("child_process") as typeof import("child_process")).execFile;
+        await new Promise<void>((resolve, reject) => {
+            execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+                windowsHide: true, timeout: 15000,
+                env: { ...process.env, SMARTMD_STAGED: staged, SMARTMD_TARGET: target, SMARTMD_BACKUP: backup },
+            }, error => error ? reject(new Error("Windows 文件替换未确认，已保留可用备份")) : resolve());
+        });
     }
 
     private async atomicWrite(
@@ -2599,7 +2608,7 @@ export class ExternalSyncService {
         await this.fs.promises.mkdir(this.path.dirname(destination), { recursive: true });
         const readOriginal = async (): Promise<string | null> => {
             try {
-                return await this.fs.promises.readFile(destination, "utf8");
+                return await this.readExternalMarkdown(destination);
             } catch (error: any) {
                 if (error?.code === "ENOENT") return null;
                 throw error; // permissions failure is never "missing file"
@@ -2624,25 +2633,10 @@ export class ExternalSyncService {
             if (await readOriginal() !== original) {
                 throw new Error("目标文件在准备写入期间变化，拒绝覆盖");
             }
+            let backup: any;
             if (original !== null) {
-                const recoveryRoot = this.path.join(this.path.dirname(destination), ".smartkeep-recovery");
-                await this.fs.promises.mkdir(recoveryRoot, { recursive: true });
-                const backup = this.path.join(recoveryRoot, uid("original") + "-" +
-                    this.path.basename(destination) + ".bak");
-                await this.fs.promises.copyFile(
-                    destination, backup, this.fs.constants.COPYFILE_EXCL,
-                );
-                const verified = await this.fs.promises.readFile(backup, "utf8");
-                if (await digest(verified) !== await digest(original)) {
-                    throw new Error("外部原文件备份校验失败，不执行正式覆盖");
-                }
-                if (backupContext) {
-                    const record = await this.createRecovery(
-                        backupContext.binding, backupContext.relativePath, original, "external",
-                    );
-                    record.externalBackupPath = backup;
-                    await (this.store as any).save();
-                }
+                if (!backupContext) throw new Error("目标已有文件，缺少可核验的恢复位置");
+                backup = await this.createRecovery(backupContext.binding, backupContext.relativePath, original, "external", true);
             }
             if (!permit() || !(await validate()) || await readOriginal() !== original) {
                 throw new Error("正式提交前原文件又发生变化，保留原件并撤销写入");
@@ -2651,7 +2645,22 @@ export class ExternalSyncService {
             if (original !== null) {
                 // Atomic replace on the same volume: original path always remains
                 // visible as either the old complete bytes or the new complete bytes.
-                await this.fs.promises.rename(temporary, destination);
+                const rollback = temporary + ".original";
+                try {
+                    await this.replaceExternalWithBackup(temporary, destination, rollback);
+                    const replaced = await this.readExternalMarkdown(rollback);
+                    if (replaced !== original) {
+                        await this.createRecovery(backupContext!.binding, backupContext!.relativePath, replaced, "external");
+                        await this.fs.promises.unlink(rollback);
+                        throw new Error("提交时发现外部文件有新修改，新版本已存入恢复区，请核对");
+                    }
+                    await this.fs.promises.unlink(rollback);
+                } catch (error) {
+                    if (await this.fs.promises.lstat(rollback).catch(() => null)) {
+                        throw new Error(localize("外部替换需要核对，原始字节保留在：{0}", rollback));
+                    }
+                    throw error;
+                }
             } else {
                 // Atomic exclusive creation; no race with a new external file.
                 // Unsupported filesystems fail closed instead of using unsafe copy.
@@ -2660,6 +2669,7 @@ export class ExternalSyncService {
             if (await this.fs.promises.readFile(destination, "utf8") !== content) {
                 throw new Error("提交后读回校验失败，保留备份等待人工核查");
             }
+            if (backup) backup.replacedAt = Date.now();
         } finally {
             if (temporaryMayBeOurs) {
                 try {
@@ -2690,25 +2700,35 @@ export class ExternalSyncService {
             if (!this.knownBindings().includes(binding)) throw new Error("同步项已解除绑定，暂存内容未落地");
             if (!(await validate())) throw new Error("最终复核发现双方再次变化，暂存内容未落地");
             if (!this.isCurrent(binding, ticket)) throw new Error("同步身份或范围已变化，暂存内容未落地");
-            this.authority.beginFinal(ticket);
             const vaultPath = normalizePath(`${binding.targetPath}/${relativePath}`);
             const current = this.app.vault.getAbstractFileByPath(vaultPath);
+            let backup: any;
             if (current instanceof TFile) {
                 // Every overwritten Vault version enters the verified recovery registry.
                 const currentContent = await this.app.vault.read(current);
-                await this.createRecovery(binding, relativePath, currentContent, "vault");
-                if (await this.app.vault.read(current) !== currentContent) {
+                backup = await this.createRecovery(binding, relativePath, currentContent, "vault", true);
+                if (!(await validate()) || await this.app.vault.read(current) !== currentContent) {
                     throw new Error("知识库原稿在备份之后发生变化，拒绝覆盖");
                 }
-                await this.app.vault.modify(current, content);
+                this.authority.beginFinal(ticket);
+                await this.app.vault.process(current, latest => {
+                    if (!this.isCurrent(binding, ticket) || latest !== currentContent ||
+                        this.app.vault.getAbstractFileByPath(vaultPath) !== current) {
+                        throw new Error("知识库原稿在备份之后发生变化，拒绝覆盖");
+                    }
+                    return content;
+                });
             } else {
                 await this.ensureVaultFolder(vaultPath);
+                if (!(await validate())) throw new Error("最终复核发现双方再次变化，暂存内容未落地");
+                this.authority.beginFinal(ticket);
                 await this.app.vault.create(vaultPath, content);
             }
             const landed = this.app.vault.getAbstractFileByPath(vaultPath);
             if (!(landed instanceof TFile) || await this.app.vault.read(landed) !== content) {
                 throw new Error("知识库提交后读回版本不符，已保留恢复档案");
             }
+            if (backup) backup.replacedAt = Date.now();
         } finally {
             // 落实 BL-EXT-009 与终审要求：在 finally 块中强制底层物理销毁暂存文件
             await this.removeCommittedExternalStage(stagingPath);

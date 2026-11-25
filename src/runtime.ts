@@ -1903,8 +1903,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             actions.createEl("button", { text: localize("⚙️ 筛选规则") }).onclick = () => {
                 this.runtime.external?.openFilterModal(binding, () => this.display());
             };
+            actions.createEl("button", { text: localize("打开恢复区") }).onclick = () => this.runtime.external?.openRecovery(binding.id);
             const isActive = binding.status === "active";
-            actions.createEl("button", { text: isActive ? localize("暂停") : localize("恢复") }).onclick = async () => {
+            actions.createEl("button", { text: isActive ? localize("暂停") : localize("恢复同步") }).onclick = async () => {
                 if (isActive) await this.runtime.external?.pause(binding.id);
                 else await this.runtime.external?.resume(binding.id);
                 this.display();
@@ -1914,28 +1915,18 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 : `排除模式 (${(binding.filterConfig?.userRules || []).length}条规则)`;
             item.createEl("p", {
                 cls: "setting-item-description smartmd-external-inline-status",
-                text: localize("{0} · 筛选: {1} · 待处理 {2} · 冲突 {3} · 可恢复 {4}", localizeMessage(this.runtime.external?.statusLabel(binding.status)), localizeMessage(filterSummary), binding.pendingCount || 0, (binding.conflicts || []).length, (binding.recoveryItems || []).length),
+                text: localize("{0} · 筛选: {1}", localizeMessage(this.runtime.external?.statusLabel(binding.status)), localizeMessage(filterSummary)),
             });
+            if (binding.lastSuccessAt) item.createEl("p", { cls: "setting-item-description",
+                text: localize("上次成功：{0}", new Date(binding.lastSuccessAt).toLocaleString()) });
+            if (binding.lastError) item.createEl("p", { cls: "setting-item-description", text: localizeMessage(binding.lastError) });
         }
         const archives = this.runtime.external?.recoveryArchives() || [];
         if (archives.length) {
             new Setting(container).setClass("smartmd-settings-subheading").setName(localize("已解绑项目的 7 天恢复区")).setHeading();
             for (const archive of archives) {
-                for (const recovery of archive.recoveryItems || []) {
-                    new Setting(container)
-                        .setName(`${archive.nickname} · ${recovery.relativePath}`)
-                        .setDesc(archive.lastError || localize("恢复前会重新确认原路径与两端版本；异常时记录会继续保留。"))
-                        .addButton((button) => button.setButtonText(localize("恢复到两端")).onClick(async () => {
-                            button.setDisabled(true).setButtonText(localize("正在确认…"));
-                            try {
-                                await this.runtime.external?.restore(archive.id, recovery.id);
-                            } catch (error: any) {
-                                new Notice(localizeMessage(String(error.message || error)), 8000);
-                            } finally {
-                                this.display();
-                            }
-                        }));
-                }
+                new Setting(container).setName(archive.nickname).addButton(button => button
+                    .setButtonText(localize("打开恢复区")).onClick(() => this.runtime.external?.openRecovery(archive.id)));
             }
         }
     }
