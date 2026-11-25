@@ -109,6 +109,14 @@ export class SmartMDRuntime {
         this.settingsTab = tab;
     }
 
+    async syncOneDriveFromShortcut(): Promise<void> {
+        if (Platform.isAndroidApp && !this.oneDrive.settings().firstSyncCompleted) {
+            this.openSettingsTab("onedrive");
+            return;
+        }
+        await this.oneDrive.manualSync();
+    }
+
     openSettingsTab(page?: "home" | "publish" | "onedrive" | "external" | "ai" | "about"): void {
         const doOpen = () => {
             try {
@@ -295,7 +303,7 @@ export class SmartMDRuntime {
             addCommand({
                 id: "suite-onedrive-sync-now",
                 name: localize("立即同步到 OneDrive"),
-                callback: () => void this.oneDrive.manualSync(),
+                callback: () => void this.syncOneDriveFromShortcut(),
             });
         }
         if (this.supportsExternalFolderSync) {
@@ -313,7 +321,7 @@ export class SmartMDRuntime {
             this.ribbonLabels.set(element, label);
         };
         addIcon("cloud", "SmartMD 发布管理", () => this.publish.openManager());
-        if (this.supportsOneDrive) addIcon("refresh-cw", "SmartMD OneDrive 同步", () => void this.oneDrive.manualSync());
+        if (this.supportsOneDrive) addIcon("refresh-cw", "SmartMD OneDrive 同步", () => void this.syncOneDriveFromShortcut());
         addIcon("wand-sparkles", "SmartMD AI 编辑器", () => void this.openAI());
     }
 
@@ -1001,9 +1009,12 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const nextCheckAt = settings.enabled && intervalMinutes > 0 && settings.lastSuccessAt
             ? Number(settings.lastSuccessAt) + intervalMinutes * 60 * 1000
             : 0;
-        const statusDescription = nextCheckAt
+        let statusDescription = nextCheckAt
             ? localize("{0}；下次检查：{1}", localizeMessage(this.runtime.oneDrive.statusText()), new Date(Math.max(Date.now(), nextCheckAt)).toLocaleString())
             : localizeMessage(this.runtime.oneDrive.statusText());
+        if (Platform.isAndroidApp && !settings.firstSyncCompleted && !this.runtime.oneDrive.isBusy()) {
+            statusDescription += " " + localize("第一次使用时，点「开始同步」可能会在 OneDrive 创建 SmartMD 文件夹。");
+        }
         new Setting(container).setClass("smartmd-settings-section-title").setName(localize("OneDrive 多设备同步")).setHeading();
         container.createEl("p", { text: Platform.isAndroidApp
             ? localize("用 OneDrive 在手机和电脑之间同步笔记和附件。")
@@ -1622,7 +1633,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 retryBtn.disabled = true;
                 retryBtn.setText(localize("正在重试…"));
                 try {
-                    await this.runtime.oneDrive.manualSync();
+                    await this.runtime.syncOneDriveFromShortcut();
                 } finally {
                     this.display();
                 }

@@ -384,6 +384,13 @@ class AppFolderConsentModal extends Modal {
     onClose(): void { this.contentEl.empty(); if (!this.completed) this.approve(false); }
 }
 
+function androidVaultDisplayName(vault: Pick<RemoteVault, "name" | "id">, vaults: RemoteVault[]): string {
+    const label = vault.name || localize("未命名知识库");
+    const hasSameName = vaults.some(other => other.id !== vault.id &&
+        (other.name || localize("未命名知识库")) === label);
+    return hasSameName ? label + " (" + vault.id + ")" : label;
+}
+
 class VaultSelectionModal extends Modal {
     private settled = false;
 
@@ -447,15 +454,10 @@ class VaultSelectionModal extends Modal {
             this.contentEl.createEl("p", { text: localize("这个微软账号下还没有 SmartMD 云端知识库。") });
         }
         const list = this.contentEl.createDiv({ cls: "smartmd-android-vault-choices" });
-        const nameCounts = new Map<string, number>();
-        for (const { name } of this.vaults) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
         for (const vault of this.vaults) {
             const button = list.createEl("button", { cls: "smartmd-android-vault-choice" });
             button.disabled = !canConnect;
-            button.createSpan({ cls: "smartmd-android-vault-name", text: vault.name || localize("未命名知识库") });
-            if ((nameCounts.get(vault.name) ?? 0) > 1) {
-                button.createSpan({ cls: "smartmd-android-vault-detail", text: localize("云端 ID：") + vault.id });
-            }
+            button.createSpan({ cls: "smartmd-android-vault-name", text: androidVaultDisplayName(vault, this.vaults) });
             if (canConnect) {
                 button.createSpan({ cls: "smartmd-android-vault-detail", text: this.eligibleReceiver
                     ? localize("预览下载到当前知识库")
@@ -526,6 +528,7 @@ export class OneDriveSyncService {
     private firstUploadInspection: { controller: AbortController; label: string } | null = null;
     private firstConnectionError = "";
     private firstConnectionProgress = "";
+    private firstConnectionNotice: Notice | null = null;
     private readonly firstUploadReadTimeoutMs = 30_000;
     private deleteGuard: ((path: string, readOnly?: boolean) => Promise<boolean>) | null = null;
     private ensuredRemoteFolders = new Set<string>();
@@ -2632,8 +2635,14 @@ export class OneDriveSyncService {
         };
         try {
             if (!initialAccount) throw new Error("请先完成微软账号登录。");
-            // The user started this check. Opening the app folder may cause
-            // OneDrive to create it. The file plan still needs approval below.
+            // Android discloses possible app folder creation next to Start
+            // syncing. Desktop keeps its existing confirmation. Both still
+            // require separate approval of the file plan below.
+            if (!Platform.isAndroidApp && !await this.approveFirstAppFolderStep(
+                "访问 OneDrive 专用应用目录",
+                "微软首次访问 AppFolder 时可能自动建立 Apps/SmartMD 文件夹。本次只批准访问和核对目录，不批准上传笔记、合并知识库或删除文件。是否继续？")) {
+                return false;
+            }
             this.vaultRegistryCache = null;
             this.registryReadIsTrusted = false;
             if (settings.firstFileJournal && !settings.firstCommitJournal?.priorBindingArchive) {
@@ -2815,11 +2824,12 @@ export class OneDriveSyncService {
                 identity: { accountId: initialAccount,
                     localVaultId: prepared.snapshot.localVaultId, cloudVaultId: choice.id },
                 androidCloudVaultName: Platform.isAndroidApp
-                    ? choice.name || localize("未命名知识库") : undefined,
+                    ? androidVaultDisplayName(choice, this.vaultRegistryCache ?? []) : undefined,
                 items,
                 priorHistoryCount: choice.mode === "new" ? Object.keys(settings.fileStates || {}).length : 0,
             };
             // User confirmation advances read-only preview to initial sync execution
+            this.firstConnectionNotice?.hide();
             await new Promise<void>((resolve) => {
                 new SyncPreviewModal(
                     this.app, preview,
@@ -2941,6 +2951,7 @@ export class OneDriveSyncService {
             });
             return Boolean(settings.firstSyncCompleted);
         } catch (error: any) {
+            this.firstConnectionNotice?.hide();
             this.firstConnectionError = localize("OneDrive 首次连接已停止：") + localizeMessage(safeOneDriveError(error));
             new Notice(this.firstConnectionError, 8000);
             return false;
@@ -2949,6 +2960,8 @@ export class OneDriveSyncService {
             this.pendingFirstChoice = null;
             this.previewVaultId = null;
             this.firstConnectionProgress = "";
+            this.firstConnectionNotice?.hide();
+            this.firstConnectionNotice = null;
             this.preparing = false;
             this.notifyStatusChange();
         }
@@ -4437,8 +4450,8 @@ export class OneDriveSyncService {
             this.pendingFirstChoice = { id: match.id, name: match.name, mode: "existing", mergeAndroid: choice.mergeAndroid };
             this.identicalRegistrationRequested = choice.registerIdentical === true;
             if (Platform.isAndroidApp) {
-                this.firstConnectionProgress = localize("正在准备「{0}」的同步预览…", match.name || localize("未命名知识库"));
-                new Notice(this.firstConnectionProgress);
+                this.firstConnectionProgress = localize("正在准备「{0}」的同步预览…", androidVaultDisplayName(match, vaults));
+                this.firstConnectionNotice = new Notice(this.firstConnectionProgress);
                 this.notifyStatusChange();
             }
         }

@@ -1611,6 +1611,7 @@ export const englishMessages: Readonly<Record<string, string>> = {
     "首次同步完成": "First sync complete",
     "正在查找 OneDrive 知识库…": "Looking for OneDrive vaults…",
     "开始同步": "Start syncing",
+    "第一次使用时，点「开始同步」可能会在 OneDrive 创建 SmartMD 文件夹。": "The first time you tap Start syncing, OneDrive may create a SmartMD folder.",
     "用 OneDrive 在手机和电脑之间同步笔记和附件。": "Use OneDrive to sync notes and attachments between your phone and computer.",
     "尚未连接 OneDrive 知识库": "No OneDrive vault connected",
     "首次连接会预览上传和下载，不会同步删除。两端都有的文件保留较新版本，同时间以 OneDrive 为准。": "Preview uploads and downloads for the first connection. No files are deleted. For different versions of the same file, keep the newer copy. OneDrive wins a tie.",
