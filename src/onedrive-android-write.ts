@@ -81,6 +81,7 @@ export async function replaceAndroidMarkdownIfUnchanged(
     expected: ArrayBuffer,
     replacement: ArrayBuffer,
     assertCurrent: () => void,
+    options?: { mtime: number },
 ): Promise<void> {
     if (file.extension.toLowerCase() !== "md") {
         throw new Error("安卓端只允许使用经过验证的 Markdown 原位更新。");
@@ -97,7 +98,7 @@ export async function replaceAndroidMarkdownIfUnchanged(
             throw new Error("安卓端写入前原文已变化，保留本机内容。");
         }
         return newText;
-    });
+    }, options);
 }
 
 /** On Android App storage, publish a verified temporary file with the host's no-replace move. */
@@ -134,56 +135,4 @@ async function moveAndroidFile(
     // The Android adapter is verified on-device to reject an existing target.
     // An error stays an error and never falls back to a write that could replace it.
     await adapter.rename(source, destination);
-}
-
-export async function trashAndroidFile(
-    vault: Pick<Vault, "adapter" | "getAbstractFileByPath">,
-    file: TFile,
-    path: string,
-    trashPath: string,
-    expected: ArrayBuffer,
-    assertCurrent: () => void,
-    assertSource: () => void,
-): Promise<void> {
-    const adapter = vault.adapter;
-    const root = getAndroidAppStorageRoot(adapter);
-    if (!root || !safeRelative(path) || !safeRelative(trashPath) ||
-        !trashPath.startsWith(".trash/smartmd-onedrive/") || path.startsWith(".")) {
-        throw new Error("安卓回收站路径或源文件不可信。");
-    }
-    const assertRoot = () => {
-        if (vault.adapter !== adapter || getAndroidAppStorageRoot(adapter) !== root) {
-            throw new Error("安卓 Vault 物理范围已变化。");
-        }
-    };
-    if (await adapter.exists(trashPath)) throw new Error("安卓回收位置已占用。");
-    const before = await adapter.readBinary(path);
-    assertRoot();
-    assertCurrent();
-    assertSource();
-    if (!sameBytes(before, expected) || file.path !== path || vault.getAbstractFileByPath(path) !== file) {
-        throw new Error("安卓端待删除的笔记已修改、移动或更换。");
-    }
-    try {
-        await adapter.rename(path, trashPath);
-        const retained = await adapter.readBinary(trashPath);
-        if (!sameBytes(retained, expected) || await adapter.exists(path)) throw new Error("安卓原件在移动期间发生变化。");
-        assertRoot();
-        assertCurrent();
-    } catch (error) {
-        // A late edit or revocation may arrive between the final read and
-        // the native move. Return those exact bytes without replacing a
-        // newly created source. The persisted recovery record pins trashPath.
-        try {
-            assertRoot();
-            if (await adapter.exists(trashPath)) {
-                if (await adapter.exists(path)) throw new Error("原路径已重新出现");
-                assertRoot();
-                await adapter.rename(trashPath, path);
-            }
-        } catch {
-            throw new Error("安卓删除结果须核对，原稿或新编辑保留在 " + trashPath);
-        }
-        throw error;
-    }
 }

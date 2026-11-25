@@ -197,7 +197,7 @@ export interface OneDriveSyncSettings {
         operationId: string;
         accountId: string; vaultId: string; deviceId: string;
         motherPath: string; direction: "upload";
-        sourceSha256: string; sourceBytes: number;
+        sourceSha256: string; sourceBytes: number; sourceMtime?: number; sourceBaseline?: string;
         expectedRemoteId: string; expectedRemoteEtag: string;
         stagingPath: string;
         phase: "STAGE_SESSION_ISSUED" | "STAGE_PUT_ISSUED" |
@@ -209,8 +209,7 @@ export interface OneDriveSyncSettings {
         sessionFingerprint?: string;
         updatedAt: number;
     }>;
-    /** Durable local-only block. Preserving copies does not resolve a conflict.
-     * Never treat this record as permission to upload, merge or delete. */
+    /** Historical evidence from releases that created separate copies. */
     pendingConflicts?: Record<string, {
         accountId: string;
         vaultId: string;

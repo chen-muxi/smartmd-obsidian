@@ -1,6 +1,6 @@
 {
     "name": "smartmd",
-    "version": "1.0.28",
+    "version": "1.0.29",
     "description": "SmartMD plugin for publishing, safe sync, and reviewed AI editing",
     "main": "main.js",
     "scripts": {

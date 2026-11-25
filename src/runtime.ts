@@ -1044,36 +1044,6 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             .setName(localize("上次成功同步"))
             .setDesc(settings.lastSuccessAt ? new Date(Number(settings.lastSuccessAt)).toLocaleString() : localize("尚无成功记录"));
 
-        const firstConflict = (settings as any).firstConflictPreservationJournal;
-        if (firstConflict) {
-            new Setting(container).setName(localize("首次冲突待处理：") + firstConflict.entries.length + localize(" 项"))
-                .setDesc(localize("原操作 ") + firstConflict.operationId + localize("；账号 ") + firstConflict.snapshot.accountId +
-                    localize("；本地库 ") + firstConflict.snapshot.localVaultId + localize("；云库 ") + firstConflict.snapshot.cloudVaultId +
-                    localize("；阶段 ") + firstConflict.phase + localize("。双方原路径保留；未绑定、未首完，不授予同步或覆盖权。以下路径为原操作历史，当前可读性须重新核验。"))
-                .addButton((button) => button.setButtonText(localize("只读核验原操作两版")).onClick(async () => {
-                    try {
-                        const result = await this.runtime.oneDrive.inspectFirstConflictPreservation();
-                        new Notice(result.entries.map((entry: any) => localize("{0}：本地副本 {1}；云端副本 {2}", entry.path,
-                            localize(entry.localVerified ? "SHA一致" : "未核实"), localize(entry.cloudVerified ? "SHA一致" : "未核实"))).join("\n"), 10000);
-                    } catch (error) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); }
-                }));
-            for (const entry of firstConflict.entries) {
-                new Setting(container).setName(entry.path)
-                    .setDesc(localize("本地源SHA ") + entry.localHash + localize("；云端源SHA ") + entry.remoteHash +
-                        "；Item ID " + entry.remoteId + "；ETag " + entry.remoteEtag +
-                        localize("；本地版路径 ") + entry.localCopyPath + localize("；云端版路径 ") + entry.cloudCopyPath +
-                        (entry.verified ? localize("；历史双版读回成功，当前仍须核验") : localize("；尚未完整保全，不表示副本已存在")))
-                    .addButton((button) => button.setButtonText(localize("本地版另存新文件")).onClick(async () => {
-                        try { new Notice(localize("已导出：") + await this.runtime.oneDrive.exportFirstConflictVersion(entry.path, "local")); }
-                        catch (error) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); }
-                    }))
-                    .addButton((button) => button.setButtonText(localize("云端版另存新文件")).onClick(async () => {
-                        try { new Notice(localize("已导出：") + await this.runtime.oneDrive.exportFirstConflictVersion(entry.path, "cloud")); }
-                        catch (error) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); }
-                    }));
-            }
-        }
-
         if (settings.identicalRegistrationJournal &&
             (settings.identicalRegistrationJournal.phase !== "COMPLETED" || !settings.firstSyncCompleted)) {
             const registration = settings.identicalRegistrationJournal;
@@ -1107,7 +1077,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             recheck.onclick = async () => {
                 recheck.disabled = true;
                 try { await this.runtime.oneDrive.recheckOneDriveRemoteIdentities();
-                    new Notice(localize("只读核对完成；尚未批准任何传输或冲突处理。"), 7000);
+                    new Notice(localize("只读核对完成。尚未批准传输。"), 7000);
                 } catch (error: any) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); }
                 finally { this.display(); }
             };
@@ -1117,7 +1087,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             const section = container.createDiv({ cls: "smartmd-onedrive-resume-review" });
             new Setting(section).setClass("smartmd-settings-subheading").setName(localize("重启后同步范围必须重新确认")).setHeading();
             section.createEl("p", { text:
-                localize("已保留历史账号、知识库和已完成文件记录，但旧上传、下载、删除和自动许可全部失效。先只读扫描云端完整清单和本地SHA，再逐项确认当前版本；未决冲突和删除继续锁定。") });
+                localize("已保留历史账号、知识库和已完成文件记录，但旧上传、下载、删除和自动许可全部失效。先核对云端完整清单与本地内容，再确认本轮同步。") });
             const dailyButton = section.createEl("button", { text: localize("核对后恢复本次日常同步") });
             dailyButton.onclick = async () => {
                 dailyButton.disabled = true;
@@ -1133,7 +1103,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                         modal.contentEl.createEl("p", { text:
                             localize("已重新核查完整云端清单、当前本地正文SHA及历史可信版本。") +
                             localize("以下普通文件可在明确确认后参与本次日常同步；") +
-                            localize("冲突、删除、未知上传和异常清单不得通过此入口获批。") });
+                            localize("删除、结果未知的上传和异常清单需要单独复核。") });
                         const uploadCount = preview.entries.filter((e) => e.action === "UPLOAD").length;
                         const downloadCount = preview.entries.filter((e) => e.action === "DOWNLOAD").length;
                         modal.contentEl.createEl("p", { text:
@@ -1195,7 +1165,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                             localize("账户：") + preview.accountId + localize("；本地库：") + preview.localVaultId +
                             localize("；云库：") + preview.cloudVaultId + localize("；设备：") + preview.deviceId });
                         modal.contentEl.createEl("p", { text:
-                            localize("所有文件、旧基线和来源版本已重新读取。此窗口不会启动后台同步；每次只能批准一项，其他文件必须重新预览。重启后历史冲突只能保留双方，不支持赢家覆盖；删除必须核对具名方向、版本与冷备。") });
+                            localize("所有文件、旧基线和来源版本已重新读取。此窗口不会启动后台同步；每次只能批准一项，其他文件必须重新预览。内容不同时采用较新的版本，修改时间相同以 OneDrive 为准。删除需核对方向和当前版本。") });
                         const actions = modal.contentEl.createDiv({ cls: "smartmd-actions" });
                         actions.createEl("button", { text: localize("取消，继续保持暂停") }).onclick = () => modal.close();
                         for (const entry of preview.entries) {
@@ -1209,11 +1179,6 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                                 localize("远端 Item ID：") + entry.remoteId + "；ETag：" + entry.remoteEtag });
                             if (entry.remoteHash) row.createEl("p", { text:
                                 localize("远端当前正文 SHA-256：") + entry.remoteHash });
-                            if (entry.protectedCopyPath) {
-                                row.createEl("p", { text: localize("受保护的另一份原稿：") + entry.protectedCopyPath +
-                                    "；ETag：" + entry.protectedCopyEtag });
-                                row.createEl("p", { text: localize("保护副本 SHA-256：") + entry.protectedCopyHash });
-                            }
                             if (entry.requiresSeparateVerification) {
                                 row.createEl("button", { text: localize("单独校验并预览此文件") }).onclick = () => {
                                     modal.close();
@@ -1223,10 +1188,8 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                             const actionNames: Record<string, string> = {
                                 UPLOAD: "上传此文件",
                                 DOWNLOAD: "下载此文件",
-                                CONFLICT_STAGE_KEEP_BOTH: "先安全备份双方修改（本次只生成保护副本，冲突仍锁定）",
-                                CONFLICT_KEEP_BOTH: "再次核对两份副本并解除本条冲突锁",
                                 DELETE_CLOUD: "删除云端此版本（先冷备）",
-                                DELETE_VAULT: "移入本地回收站（先冷备）",
+                                DELETE_VAULT: "删除本机文件",
                             };
                             const actionLabel = localizeMessage(actionNames[entry.action]);
                             if (!actionLabel) continue;
@@ -1273,7 +1236,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         // A read-only audit can explain matched original/staging versions,
         // but deliberately has no "release", "retry" or "delete" button.
         const pendingUnknown = Object.entries(settings.pendingUploadOperations || {})
-            .filter(([, record]: [string, any]) => record?.phase === "RECONCILE_REQUIRED");
+            .filter(([, record]: [string, any]) => record && this.runtime.oneDrive.canAuditUnknownUpload(record));
         if (pendingUnknown.length) {
             const section = container.createDiv({ cls: "smartmd-onedrive-unknown-review" });
             new Setting(section).setClass("smartmd-settings-subheading").setName(localize("OneDrive 上次上传结果未明：") + pendingUnknown.length + localize(" 项")).setHeading();
@@ -1456,69 +1419,6 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             }
         }
 
-        const unresolvedConflicts = this.runtime.oneDrive.listPendingOneDriveConflicts();
-        if (unresolvedConflicts.length) {
-            const section = container.createDiv({ cls: "smartmd-onedrive-conflict-review" });
-            new Setting(section).setClass("smartmd-settings-subheading").setName(localize("OneDrive 未决双端冲突：") + unresolvedConflicts.length + localize(" 项")).setHeading();
-            section.createEl("p", { text:
-                localize("默认继续锁定，绝不自动覆盖、合并或删除任一版本。逐条检查双方文件和 SHA/ETag 后，只能明确选择保留双方。") });
-            for (const item of unresolvedConflicts) {
-                const row = section.createDiv({ cls: "smartmd-card" });
-                row.createEl("strong", { text: item.path });
-                row.createEl("p", { text: localize("本地保存的冲突副本：") + item.localCopyPath });
-                row.createEl("p", { text: localize("原稿云版本：") + item.remoteEtag + localize("；已保存云副本版本：") + item.copyEtag });
-                if (!item.trustedScope) {
-                    row.createEl("p", { text: localize("账户、知识库或设备身份与本机不一致，禁止确认解除。") });
-                    continue;
-                }
-                row.createEl("button", { text: localize("逐项检查并选择保留双方") }).onclick = async () => {
-                    try {
-                        const preview = await this.runtime.oneDrive.prepareOneDriveConflictReview(item.path);
-                        const modal = new Modal(this.runtime.app);
-                        let committed = false;
-                        modal.onOpen = () => {
-                            modal.titleEl.setText(localize("核对未决冲突：保留双方"));
-                            modal.contentEl.createEl("p", { text: localize("原稿：") + preview.path });
-                            modal.contentEl.createEl("p", { text: localize("本地保存版本：") + preview.localCopyPath });
-                            modal.contentEl.createEl("p", { text: localize("微软账户：") + preview.accountId + localize("；云端库：") + preview.vaultId });
-                            modal.contentEl.createEl("p", { text: localize("原稿云 ETag：") + preview.originalEtag });
-                            modal.contentEl.createEl("p", { text: localize("本地副本/云副本 ETag：") + preview.copyEtag });
-                            modal.contentEl.createEl("p", { text: localize("原稿 SHA-256：") + preview.originalHash });
-                            modal.contentEl.createEl("p", { text: localize("已保留版本 SHA-256：") + preview.preservedHash });
-                            modal.contentEl.createEl("p", { text:
-                                preview.needsLocalUpdate
-                                    ? localize("安卓上次未完成最后一步。确认后将把已核验的云端版本写入本机原路径，并保留本机和云端的冲突副本。")
-                                    : localize("确认两份原文及其副本已经分别读回。再次核对仍一致才解除本条未决锁。") });
-                            const actions = modal.contentEl.createDiv({ cls: "smartmd-actions" });
-                            actions.createEl("button", { text: localize("取消，继续保留未决") }).onclick = () => modal.close();
-                            const approve = actions.createEl("button", { text: localize("明确确认保留两份并解除此项锁"), cls: "mod-cta" });
-                            approve.onclick = async () => {
-                                if (committed) return;
-                                committed = true;
-                                approve.disabled = true;
-                                try {
-                                    await this.runtime.oneDrive.confirmOneDriveConflictReview(preview.ticket, true);
-                                    new Notice(localize("已核验并保留两份版本；本条冲突解除后仍须手动同步核对。"));
-                                } catch (error: any) {
-                                    new Notice(localize("冲突确认未生效：") + localizeMessage(safeOneDriveError(error)), 8000);
-                                } finally {
-                                    modal.close();
-                                    this.display();
-                                }
-                            };
-                        };
-                        modal.onClose = () => {
-                            if (!committed) void this.runtime.oneDrive.confirmOneDriveConflictReview(preview.ticket, false);
-                            modal.contentEl.empty();
-                        };
-                        modal.open();
-                    } catch (error: any) {
-                        new Notice(localize("无法安全预览冲突：") + localizeMessage(safeOneDriveError(error)), 8000);
-                    }
-                };
-            }
-        }
-
         const retained = this.runtime.oneDrive.listAndroidRetainedDeletionPaths();
         if (retained.length) {
             const area = container.createDiv({ cls: "smartmd-onedrive-delete-review" });
@@ -1544,7 +1444,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 row.createEl("strong", { text: item.path });
                 row.createEl("p", { text: item.direction === "cloud"
                     ? localize("授权后会将云端这份移入 OneDrive 回收站")
-                    : Platform.isAndroidApp ? localize("授权后会从知识库移除本地笔记，并保留回收副本")
+                    : Platform.isAndroidApp ? localize("授权后直接删除安卓上的本地文件")
                     : localize("授权后会将此本地笔记移入 Windows 系统回收站") });
                 row.createEl("p", { text: localize("版本：") + item.version.slice(0, 28) });
             }
@@ -1864,7 +1764,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         }
         new Setting(container)
             .setName(localize("设备名称"))
-            .setDesc(localize("发生冲突时用于区分保留的两份文件。"))
+            .setDesc(localize("此名称用于识别当前同步设备。"))
             .addText((text) => text.setValue(settings.deviceName || "").onChange(async (value) => { settings.deviceName = value.trim(); await (this.runtime.store as any).save(); }));
     }
 
@@ -2098,7 +1998,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             "本地知识库始终由用户掌控。",
             "发布内容以本地 Markdown 为唯一正文来源。",
             "AI 修改必须经过用户确认。",
-            "同步发生冲突时优先保留双方内容。",
+            "OneDrive 同步保留最新文件，同一修改时间以云端为准。",
             "项目将以公益和开源方向持续维护。",
         ]) principles.createEl("li", { text: localizeMessage(text) });
 

@@ -22,7 +22,7 @@ import {
 } from "./types";
 import { OperationAuthority, RunTicket } from "./operation-authority";
 import { inspectAndroidReceiverCandidateInventory, inspectReceiverCandidateInventory } from "./onedrive-receiver-audit";
-import { placeAndroidStagedFile, replaceAndroidBinaryIfUnchanged, replaceAndroidMarkdownIfUnchanged, trashAndroidFile } from "./onedrive-android-write";
+import { placeAndroidStagedFile, replaceAndroidBinaryIfUnchanged, replaceAndroidMarkdownIfUnchanged } from "./onedrive-android-write";
 import { redactOneDriveText, safeOneDriveError } from "./onedrive-error-redaction";
 
 
@@ -35,6 +35,7 @@ type RemoteFile = {
     downloadUrl?: string;
     quickXorHash?: string;
     sha1Hash?: string;
+    mtime?: number;
 };
 
 type LocalFile = {
@@ -50,7 +51,6 @@ type RemoteVault = {
     updatedAt: number;
     registrationOpId?: string;
     registerIdentical?: boolean;
-    preserveFirstConflicts?: boolean;
 };
 
 type SyncPreviewItem = {
@@ -65,12 +65,10 @@ type SyncPreview = {
     remoteCount: number;
     uploadCount: number;
     downloadCount: number;
-    possibleConflicts: number;
     skippedCount: number;
     uploadPaths: string[];
     downloadPaths: string[];
     samePaths: string[];
-    conflictPaths: string[];
     skippedPaths: string[];
     unknownPaths: string[];
     unexpectedNewTarget: boolean;
@@ -89,15 +87,6 @@ function requireWindowsHost(): void {
     if (!Platform.isDesktopApp || !Platform.isWin) {
         throw new Error("该高级 OneDrive 操作需要 Windows 桌面版。");
     }
-}
-
-function conflictPath(path: string, deviceName: string): string {
-    const dot = path.lastIndexOf(".");
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const safeDevice = deviceName.replace(/[\\/:*?"<>|]/g, "-").slice(0, 30) || "device";
-    return dot > path.lastIndexOf("/")
-        ? `${path.slice(0, dot)}.conflict-${safeDevice}-${stamp}${path.slice(dot)}`
-        : `${path}.conflict-${safeDevice}-${stamp}`;
 }
 
 function ignoreMatcher(pattern: string): RegExp {
@@ -185,6 +174,7 @@ type FirstFileJournal = {
     ruleDigest: string;
     files: FirstFileEntry[];
     activeUploadPath?: string | null;
+    sourceMtimeByPath?: Record<string, number>;
     completed: Record<string, { id: string; etag: string }>;
     stage: "TRANSFERRING" | "RECONCILE_REQUIRED" | "FILES_COPIED";
     updatedAt: number;
@@ -248,7 +238,6 @@ export class SyncPreviewModal extends Modal {
         list.createEl("li", { text: localize("预计下载：{0}", this.preview.downloadCount) });
         if (!this.preview.finishFirstUploadOnly) {
             list.createEl("li", { text: localize("同路径内容相同：{0}", this.preview.samePaths.length) });
-            list.createEl("li", { text: localize("同路径内容冲突：{0}", this.preview.conflictPaths.length) });
             list.createEl("li", { text: localize("因大小限制或排除规则跳过：{0}", this.preview.skippedCount) });
             list.createEl("li", { text: localize("内容无法核实：{0}", this.preview.unknownPaths.length) });
         }
@@ -256,7 +245,6 @@ export class SyncPreviewModal extends Modal {
             [localize("将上传"), this.preview.uploadPaths, localize("本机 → 云端")],
             [localize("将下载"), this.preview.downloadPaths, localize("云端 → 本机")],
             [localize("内容相同"), this.preview.samePaths, localize("不传输（字节相同）")],
-            [localize("内容冲突（保留双方）"), this.preview.conflictPaths, localize("暂停，保留双方原件")],
             [localize("跳过"), this.preview.skippedPaths, localize("不执行上传、下载或删除")],
             [localize("无法确认（禁止执行）"), this.preview.unknownPaths, localize("暂停，禁止执行")],
         ];
@@ -291,12 +279,12 @@ export class SyncPreviewModal extends Modal {
         actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
         const start = actions.createEl("button", { text: this.preview.finishFirstUploadOnly ? localize("确认并完成绑定")
             : this.commitEnabled ? localize("确认并开始同步") : localize("尚未开放首次同步"), cls: "mod-cta" });
-        const unresolved = this.preview.conflictPaths.length > 0 ||
+        const unresolved =
             this.preview.unknownPaths.length > 0 || this.preview.unexpectedNewTarget;
         if (unresolved) this.contentEl.createEl("p", {
             text: this.preview.unexpectedNewTarget
                 ? localize("拟新建的云端目标已有未登记内容，不能按全新空库提交；请重新检查云端身份。")
-                : localize("存在尚未解决的冲突或无法确认的内容，请重新检查或选择安全处理方式；本次不能开始同步。"),
+                : localize("有文件的内容或版本无法核实。请重新检查后再同步。"),
         });
         start.disabled = !this.commitEnabled || unresolved;
         start.onclick = async () => {
@@ -385,8 +373,6 @@ class VaultSelectionModal extends Modal {
             if (this.allowDesktopRegistration) {
                 item.createEl("button", { text: localize("高级：仅登记完全一致的内容") }).onclick =
                     () => this.finish({ ...vault, registerIdentical: true });
-                item.createEl("button", { text: localize("高级：首次冲突仅保留两版") }).onclick =
-                    () => this.finish({ ...vault, preserveFirstConflicts: true });
                 item.createEl("p", { text: localize("高级同内容登记另行核对双端全文，仅在全范围一致并最终确认后记录本机基线，不传正文、不删除、不自动同步。") });
             }
             item.createEl("p", {
@@ -401,7 +387,7 @@ class VaultSelectionModal extends Modal {
         const merge = this.contentEl.createEl("button", { text: localize("查看差异并安全合并") });
         merge.disabled = true;
         this.contentEl.createEl("p", {
-            text: localize("高级合并必须先完成双端版本与冲突恢复方案核验，当前暂不可执行；现有内容不会被删除。"),
+            text: localize("合并现有知识库需要先核对双端文件版本，当前不可用。"),
         });
     }
 
@@ -417,32 +403,13 @@ class VaultSelectionModal extends Modal {
     }
 }
 
-type ConflictReviewState = {
-    path: string; accountId: string; vaultId: string; deviceId: string;
-    markerDigest: string; baselineDigest: string;
-    originalLocalHash: string; originalLocalMtime: number; originalLocalSize: number;
-    localCopyHash: string; localCopyMtime: number; localCopySize: number;
-    originalRemoteId: string; originalRemoteEtag: string; originalRemoteHash: string;
-    copyRemoteId: string; copyRemoteEtag: string; copyRemoteHash: string;
-    copyPath: string;
-    needsLocalUpdate: boolean;
-};
-
-export type OneDriveConflictReview = {
-    ticket: object; path: string; accountId: string; vaultId: string;
-    localCopyPath: string; originalEtag: string; copyEtag: string;
-    originalHash: string; preservedHash: string; expiresAt: number;
-    needsLocalUpdate: boolean;
-};
-
-type ResumedAction = "UPLOAD" | "DOWNLOAD" | "CONFLICT_KEEP_BOTH"
-    | "CONFLICT_STAGE_KEEP_BOTH" | "DELETE_CLOUD" | "DELETE_VAULT" | "UNCHANGED" | "HOLD";
+type ResumedAction = "UPLOAD" | "DOWNLOAD"
+    | "DELETE_CLOUD" | "DELETE_VAULT" | "UNCHANGED" | "HOLD";
 type ResumedEntry = {
     path: string; action: ResumedAction; reason: string;
     localHash: string; localMtime: number; localSize: number;
     remoteId: string; remoteEtag: string; remoteSize: number; remoteHash: string;
     baselineHash: string; baselineRemoteId: string; baselineRemoteEtag: string;
-    protectedCopyPath?: string; protectedCopyEtag?: string; protectedCopyHash?: string;
     requiresSeparateVerification?: boolean;
 };
 type ResumedSnapshot = {
@@ -505,8 +472,6 @@ export class OneDriveSyncService {
         baselineHash: string; fields: SharedSmartMDState; expiresAt: number;
     } | null = null;
     private authority = new OperationAuthority();
-    private conflictReviewTickets = new WeakMap<object, { path: string; snapshot: string; expiresAt: number }>();
-    private conflictReviewInFlight = false;
     private resumedReviewTickets = new WeakMap<object, {
         snapshot: string; expiresAt: number; targetPath?: string;
     }>();
@@ -523,7 +488,7 @@ export class OneDriveSyncService {
     // upload. No old broad run grant or persisted blanket authorization.
     private unknownSettlementInFlight = false;
     private unknownSettlementTickets = new WeakMap<object, {
-        path: string; scope: string; ledger: string; entry: string; expiresAt: number;
+        path: string; scope: string; ledger: string; entry: string; baseline: string; expiresAt: number;
     }>();
     private interruptedCleanupTickets = new WeakMap<object, {
         path: string; scope: string; record: string; baseline: string;
@@ -676,11 +641,9 @@ export class OneDriveSyncService {
             return orphanStaging.some((item) =>
                 item.path.split("/").slice(2).join("/") === safeName);
         };
-        const held = new Set<string>(Object.values(s.pendingConflicts || {})
-            .map((item: any) => String(item?.localCopyPath || "")).filter(Boolean));
         const paths = [...new Set([
             ...localMap.keys(), ...remoteMap.keys(), ...Object.keys(previous),
-            ...Object.keys(s.pendingConflicts || {}), ...Object.keys(s.pendingDeletions || {}),
+            ...Object.keys(s.pendingDeletions || {}),
             ...Object.keys(uploadLedger),
         ])].sort();
         const entries: ResumedEntry[] = [];
@@ -701,58 +664,40 @@ export class OneDriveSyncService {
                 && (!remote || remote.size <= permittedBytes);
             const unknownPriorWrite = Boolean(uploadLedger[path]) || matchesOrphan(path);
             const blocked = this.isIgnored(path) || /^_suite_staging\//i.test(path)
-                || /^\.suite-(?:staging|recovery)\//i.test(path) || !small || held.has(path)
+                || /^\.suite-(?:staging|recovery)\//i.test(path) || !small
                 || unknownPriorWrite
-                || Boolean(s.pendingConflicts?.[path] || s.pendingDeletions?.[path]);
+                || Boolean(s.pendingDeletions?.[path]);
             const localHash = localFile && small
                 ? await this.sha256Bytes(await this.app.vault.readBinary(localFile)) : "";
             let action: ResumedAction = "HOLD";
-            let reason = "需单独核对旧版本、删除或未决冲突；本轮不得写入";
+            let reason = "需核对同步范围与文件版本，本轮暂不写入";
             if (blocked) reason = unknownPriorWrite
                 ? "原上传操作/暂存副本未按操作ID、阶段、源SHA与目标版本完成只读对账，母文件不得重发"
-                : "忽略/超限/未决冲突/删除保护：不得继承执行许可";
-            else if (localFile && remote && old?.localHash &&
-                old.remoteId === remote.id && old.remoteEtag &&
-                old.remoteEtag !== remote.etag && old.localHash !== localHash) {
-                // Both known versions changed. This is a two-confirmation
-                // preservation operation, never an ordinary upload/download.
-                // Preview itself remains GET-only; no staging before consent.
-                action = "CONFLICT_STAGE_KEEP_BOTH";
-                reason = "双方均已修改：本次仅可确认生成物理与云端保护副本；下一次需重新核对两份后才能解除冲突锁";
-            } else if (localFile && remote && old?.localHash && old.remoteId === remote.id) {
+                : "忽略/超限/删除保护：不得继承执行许可";
+            else if (localFile && remote && old?.localHash && old.remoteId === remote.id) {
                 const changedLocal = old.localHash !== localHash;
                 const changedRemote = old.remoteEtag !== remote.etag;
                 if (!changedLocal && !changedRemote) { action = "UNCHANGED"; reason = "可信基线未变化"; }
-                else if (changedLocal && changedRemote) reason = "双方同时变化：必须另行处理冲突";
+                else if (changedLocal && changedRemote) {
+                    action = await this.oneDriveVersionWins(path, localFile.stat.mtime, remote)
+                        ? "DOWNLOAD" : "UPLOAD";
+                    reason = "采用修改时间较新的版本，时间相同以 OneDrive 为准";
+                }
                 else { action = changedLocal ? "UPLOAD" : "DOWNLOAD"; reason = "仅一端变化，允许本条独立预览"; }
             } else if (!localFile && remote && !old) {
                 action = "DOWNLOAD"; reason = "新云端文件，用户按当前ItemID/ETag逐项批准下载";
             } else if (localFile && !remote && !old) {
                 action = "UPLOAD"; reason = "新本地文件，用户按当前实际SHA逐项批准上传";
             } else if (localFile && remote && !old) {
-                reason = "双方同名但无可信旧基线：本次不可选择赢家";
+                action = await this.oneDriveVersionWins(path, localFile.stat.mtime, remote)
+                    ? "DOWNLOAD" : "UPLOAD";
+                reason = "采用修改时间较新的版本，时间相同以 OneDrive 为准";
             }
-            let protectedCopyPath = "", protectedCopyEtag = "", protectedCopyHash = "";
-            const conflict = s.pendingConflicts?.[path];
             const deletion = s.pendingDeletions?.[path];
-            const safeProtectedPath = !this.isIgnored(path) && small && !held.has(path)
+            const safeProtectedPath = !this.isIgnored(path) && small
                 && !/^_suite_staging\//i.test(path)
                 && !/^\.suite-(?:staging|recovery)\//i.test(path);
-            if (safeProtectedPath && conflict && !deletion) {
-                try {
-                    const verified = await this.capturePendingConflictReview(path, true);
-                    action = "CONFLICT_KEEP_BOTH";
-                    reason = verified.needsLocalUpdate
-                        ? "两端的冲突副本已核验；确认后将云版补写到安卓原路径，保留已核验的本机冲突副本"
-                        : "当前双端原稿及两份副本已按本机与云端SHA重新核验；仅可明确确认保留双方";
-                    protectedCopyPath = verified.copyPath;
-                    protectedCopyEtag = verified.copyRemoteEtag;
-                    protectedCopyHash = verified.localCopyHash;
-                } catch {
-                    action = "HOLD";
-                    reason = "历史冲突当前版本/作用域尚不可完全核验，两份原文继续保留";
-                }
-            } else if (safeProtectedPath && deletion && !conflict && old
+            if (safeProtectedPath && deletion && old
                 && deletion.accountId === accountId &&
                 deletion.vaultId === s.vaultId && deletion.deviceId === s.deviceId) {
                 if (deletion.direction === "cloud" && !localFile && remote
@@ -773,14 +718,13 @@ export class OneDriveSyncService {
                         ? await this.deleteGuard(path, true) : false;
                     if (!externalProtected) {
                         action = "DELETE_VAULT";
-                        reason = "云端缺失但本地原稿仍在；只允许明确批准当前本地SHA/回收站冷备";
+                        reason = "云端文件已缺失，需核对本地版后确认删除";
                     }
                 }
             }
             let remoteHash = "";
             let requiresSeparateVerification: boolean | undefined;
             if ((action === "DOWNLOAD" || action === "DELETE_CLOUD"
-                || action === "CONFLICT_STAGE_KEEP_BOTH"
                 || (action === "UPLOAD" && remote)) && remote) {
                 if (remote.size > inspectionBudget) {
                     action = "HOLD"; reason = "只读下载校验预算不足，禁止未验版本写入";
@@ -792,6 +736,13 @@ export class OneDriveSyncService {
                     }
                     remoteHash = await this.sha256Bytes(data);
                     inspectionBudget -= data.byteLength;
+                    if (localFile && remoteHash === localHash) {
+                        action = "UNCHANGED";
+                        reason = "双端内容一致，无需传输";
+                    } else if (localFile && old?.localHash === remoteHash && old.localHash !== localHash) {
+                        action = "UPLOAD";
+                        reason = "仅本机正文有变化";
+                    }
                 }
             }
             entries.push({
@@ -801,7 +752,7 @@ export class OneDriveSyncService {
                 remoteHash, baselineHash: old?.localHash || "",
                 baselineRemoteId: old?.remoteId || "",
                 baselineRemoteEtag: old?.remoteEtag || "",
-                protectedCopyPath, protectedCopyEtag, protectedCopyHash, requiresSeparateVerification,
+                requiresSeparateVerification,
             });
         }
         if (scope !== JSON.stringify([
@@ -825,7 +776,7 @@ export class OneDriveSyncService {
             localVaultId: String(s.localVaultId || ""), cloudVaultId: String(s.cloudVaultId || ""),
             ruleHash: JSON.stringify([s.ignorePatterns || [], s.maxFileSizeMb]),
             baselineHash: JSON.stringify(s.fileStates || {}),
-            pendingHash: JSON.stringify([s.pendingConflicts || {}, s.pendingDeletions || {},
+            pendingHash: JSON.stringify([s.pendingDeletions || {},
                 s.pendingUploadOperations || {}, s.firstCommitJournal || null,
                 s.firstFileJournal || null]),
             sharedHash: this.sharedStateFingerprint(), entries,
@@ -871,12 +822,11 @@ export class OneDriveSyncService {
             && firstFile.accountId === snapshot.accountId
             && firstFile.cloudVaultId === snapshot.vaultId
             && firstFile.deviceId === snapshot.deviceId;
-        if (Object.keys(s.pendingConflicts || {}).length ||
-            Object.keys(s.pendingDeletions || {}).length ||
+        if (Object.keys(s.pendingDeletions || {}).length ||
             Object.keys(s.pendingUploadOperations || {}).length ||
             (registration && !trustedCompletedRegistration) ||
             (firstFile && !trustedCompletedFirstFile)) {
-            throw new Error("仍有冲突、删除、未知上传或未结算首次提交记录，须逐项结案后才能恢复日常同步");
+            throw new Error("仍有删除、未知上传或未结算首次提交记录，须逐项结案后才能恢复日常同步");
         }
         const active = snapshot.entries.filter((entry) => !this.isIgnored(entry.path) &&
             (!Platform.isAndroidApp || Math.max(entry.localSize, entry.remoteSize) <= this.maxBytes()));
@@ -986,6 +936,11 @@ export class OneDriveSyncService {
      * staging copy, release the ledger, or promote fileStates: those require
      * a separately specified and tested recovery transaction.
      */
+    canAuditUnknownUpload(record: { phase: string; sourceMtime?: number }): boolean {
+        return record.phase === "RECONCILE_REQUIRED" ||
+            (record.phase === "FINAL_PUT_ISSUED" && Number.isFinite(record.sourceMtime));
+    }
+
     async auditPendingUnknownUploadsReadOnly(): Promise<{
         accountId: string; vaultId: string; readOnly: true; canResume: false;
         entries: Array<{
@@ -1036,7 +991,7 @@ export class OneDriveSyncService {
             const sourceSha = String(item?.sourceSha256 || "").toLowerCase();
             const bytes = Number(item?.sourceBytes);
             if (!legalPath || !item || typeof item !== "object" ||
-                item.phase !== "RECONCILE_REQUIRED" ||
+                !this.canAuditUnknownUpload(item) ||
                 item.direction !== "upload" || item.motherPath !== path ||
                 item.accountId !== accountId || item.vaultId !== settings.vaultId ||
                 item.deviceId !== settings.deviceId ||
@@ -1058,7 +1013,12 @@ export class OneDriveSyncService {
                 staging[0].etag !== item.stageEtag ||
                 (item.finalId && mother[0].id !== item.finalId) ||
                 (item.finalEtag && mother[0].etag !== item.finalEtag) ||
-                (item.expectedRemoteId && mother[0].id !== item.expectedRemoteId)) continue;
+                (item.expectedRemoteId && mother[0].id !== item.expectedRemoteId) ||
+                (item.expectedRemoteEtag && mother[0].etag === item.expectedRemoteEtag)) continue;
+            if (item.sourceMtime !== undefined && mother[0].mtime !== item.sourceMtime) {
+                result.reason = localize("OneDrive 尚未确认文件原修改时间：{0}", redactOneDriveText(path));
+                continue;
+            }
             // Unknown remote writes must never be treated as a successful
             // known baseline merely because the filename happens to exist.
             // Charge the full potential read budget before any awaited I/O,
@@ -1113,17 +1073,20 @@ export class OneDriveSyncService {
         }
         const audit = await this.auditPendingUnknownUploadsReadOnly();
         const entry = audit.entries.find((item) => item.path === path);
-        const record = this.settings().pendingUploadOperations?.[path];
-        if (!entry || entry.status !== "VERIFIED_BUT_LOCKED" ||
-            !record || record.phase !== "RECONCILE_REQUIRED" ||
-            this.settings().fileStates?.[path]) {
+        const settings = this.settings();
+        const record = settings.pendingUploadOperations?.[path];
+        const baseline = JSON.stringify(settings.fileStates?.[path] || null);
+        if (!entry || entry.status !== "VERIFIED_BUT_LOCKED" || !record ||
+            !this.canAuditUnknownUpload(record) ||
+            (record.sourceBaseline !== undefined ? record.sourceBaseline !== baseline : baseline !== "null")) {
             throw new Error("原操作的两处云端副本及本机SHA尚未全部核实，不允许结算");
         }
         const ticket = Object.freeze({});
         const expiresAt = Date.now() + 5 * 60_000;
         this.unknownSettlementTickets.set(ticket, {
             path, scope: this.resumedContextKey(),
-            ledger: JSON.stringify(record), entry: JSON.stringify(entry), expiresAt,
+            ledger: JSON.stringify(record), entry: JSON.stringify(entry),
+            baseline, expiresAt,
         });
         return { ticket, path, accountId: audit.accountId, vaultId: audit.vaultId,
             remoteId: entry.remoteId, remoteEtag: entry.remoteEtag,
@@ -1158,7 +1121,7 @@ export class OneDriveSyncService {
             if (!this.resumedHistoricalIdentityTrusted() ||
                 issued.scope !== this.resumedContextKey() ||
                 !record || JSON.stringify(record) !== issued.ledger ||
-                s.fileStates?.[issued.path]) {
+                JSON.stringify(s.fileStates?.[issued.path] || null) !== issued.baseline) {
                 throw new Error("旧上传原操作或当前物理身份变化，不能继续确认");
             }
             const audit = await this.auditPendingUnknownUploadsReadOnly();
@@ -1167,13 +1130,15 @@ export class OneDriveSyncService {
                 JSON.stringify(verified) !== issued.entry ||
                 issued.expiresAt <= Date.now() ||
                 issued.scope !== this.resumedContextKey() ||
-                JSON.stringify(records[issued.path]) !== issued.ledger) {
+                JSON.stringify(records[issued.path]) !== issued.ledger ||
+                JSON.stringify(s.fileStates?.[issued.path] || null) !== issued.baseline) {
                 throw new Error("确认时本地/远端正文或版本已变化，继续保留UNKNOWN锁");
             }
             const file = this.app.vault.getAbstractFileByPath(issued.path);
             if (!(file instanceof TFile) ||
                 await this.sha256Bytes(await this.app.vault.readBinary(file)) !== verified.sourceSha256 ||
-                this.settings() !== s || !this.resumedHistoricalIdentityTrusted()) {
+                this.settings() !== s || !this.resumedHistoricalIdentityTrusted() ||
+                JSON.stringify(s.fileStates?.[issued.path] || null) !== issued.baseline) {
                 throw new Error("原始本机文件或设备证明在结算前变化，保持UNKNOWN锁");
             }
 
@@ -1220,6 +1185,7 @@ export class OneDriveSyncService {
             if (!original || !stage ||
                 original.id !== verified.remoteId ||
                 original.etag !== verified.remoteEtag ||
+                (record.sourceMtime !== undefined && original.mtime !== record.sourceMtime) ||
                 stage.etag !== verified.stagingEtag ||
                 stage.path !== record.stagingPath ||
                 await this.sha256Bytes(await this.remoteBytes(original)) !== verified.sourceSha256 ||
@@ -1321,6 +1287,7 @@ export class OneDriveSyncService {
             mother[0].id !== record.finalId ||
             mother[0].etag !== record.finalEtag ||
             mother[0].size !== length ||
+            (record.sourceMtime !== undefined && mother[0].mtime !== record.sourceMtime) ||
             await this.sha256Bytes(await this.remoteBytes(mother[0])) !==
                 String(record.sourceSha256).toLowerCase()) {
             throw new Error("结算中断后云端最终原稿身份或字节不匹配");
@@ -1529,8 +1496,7 @@ export class OneDriveSyncService {
                 throw new Error("本机字节SHA、云端ItemID/ETag、完整清单或身份已经变化，旧预览不可执行");
             }
             const chosen = snapshot.entries.find((row) => row.path === targetPath);
-            if (!chosen || !["UPLOAD", "DOWNLOAD", "CONFLICT_KEEP_BOTH",
-                "CONFLICT_STAGE_KEEP_BOTH", "DELETE_CLOUD", "DELETE_VAULT"].includes(chosen.action) ||
+            if (!chosen || !["UPLOAD", "DOWNLOAD", "DELETE_CLOUD", "DELETE_VAULT"].includes(chosen.action) ||
                 chosen.path.startsWith("/") || chosen.path.includes("\\") ||
                 chosen.path.split("/").includes("..")) {
                 throw new Error("本条不是已完成只读审核的精确上传/下载范围，不允许自动选赢家或删除");
@@ -1552,65 +1518,6 @@ export class OneDriveSyncService {
             // No mutation of s.runAllowed/confirmed/auto settings is permitted.
             // Even a crash during physical write cannot persist a broad grant.
             const beforeBaseline: Record<string, any> = { ...(s.fileStates || {}) };
-            if (chosen.action === "CONFLICT_STAGE_KEEP_BOTH") {
-                // A and cloud both changed since the SAME trusted baseline.
-                // Explicit consent #1 creates a verified independent copy,
-                // and records the HOLD; it does not resolve or dismiss it.
-                const old = s.fileStates?.[targetPath];
-                const local = this.localFiles().find((item) => item.path === targetPath);
-                const remote = (await this.remoteFiles(true, true))
-                    .find((item) => item.path === targetPath);
-                if (!old?.localHash || old.remoteId !== chosen.remoteId ||
-                    !old.remoteEtag || old.localHash === chosen.localHash ||
-                    old.remoteEtag === chosen.remoteEtag ||
-                    s.pendingConflicts?.[targetPath] || s.pendingDeletions?.[targetPath] ||
-                    s.pendingUploadOperations?.[targetPath] ||
-                    !local || !remote || remote.id !== chosen.remoteId ||
-                    remote.etag !== chosen.remoteEtag || remote.size !== chosen.remoteSize ||
-                    local.size !== chosen.localSize || local.mtime !== chosen.localMtime ||
-                    await this.sha256Bytes(await this.app.vault.readBinary(local.file)) !== chosen.localHash ||
-                    await this.sha256Bytes(await this.remoteBytes(remote)) !== chosen.remoteHash) {
-                    throw new Error("双方版本或冲突凭据已变化，停止生成保护副本，保留双方原稿");
-                }
-                this.assertCurrent(operation);
-                this.authority.beginFinal(operation);
-                await this.preserveConflict(operation, local, remote);
-                this.assertCurrent(operation);
-                const marker = s.pendingConflicts?.[targetPath];
-                if (!marker || marker.accountId !== String(
-                    (this.store as any).settings.local.microsoftAccountId || "") ||
-                    marker.remoteId !== chosen.remoteId ||
-                    marker.remoteEtag !== chosen.remoteEtag ||
-                    marker.localHash !== chosen.localHash ||
-                    !marker.localCopyPath || !marker.remoteCopyId || !marker.remoteCopyEtag) {
-                    throw new Error("保护副本的持久冲突登记未核实，继续锁定双方原稿");
-                }
-                const localCopy = await this.readPhysicalBinary(marker.localCopyPath);
-                const currentOriginal = await this.readPhysicalBinary(targetPath);
-                if (await this.sha256Bytes(localCopy) !== chosen.localHash ||
-                    await this.sha256Bytes(currentOriginal) !== chosen.remoteHash) {
-                    throw new Error("冲突两份物理原稿字节不符，继续锁定，不解除任何许可");
-                }
-                s.status = "paused";
-                s.enabled = false;
-                s.runAllowed = false;
-                s.lastError = "双方原稿及云端保护副本已保存；冲突仍锁定，必须再次只读预览并明确确认保留两份";
-                await (this.store as any).save();
-                this.notifyStatusChange();
-                return true;
-            }
-            if (chosen.action === "CONFLICT_KEEP_BOTH") {
-                const preparedConflict = await this.prepareOneDriveConflictReview(
-                    targetPath, operation,
-                );
-                const kept = await this.confirmOneDriveConflictReview(
-                    preparedConflict.ticket, true, operation,
-                );
-                if (!kept) throw new Error("冲突双端版本的独立确认未生效");
-                this.assertCurrent(operation);
-                this.notifyStatusChange();
-                return true;
-            }
             if (chosen.action === "DELETE_CLOUD" || chosen.action === "DELETE_VAULT") {
                 await this.confirmPendingOneDriveDeletions([targetPath], true, operation);
                 this.assertCurrent(operation);
@@ -1723,224 +1630,6 @@ export class OneDriveSyncService {
             this.resumedAuthorizedPath = "";
             this.resumedAuthorizedAction = null;
             this.resumedInFlight = false;
-        }
-    }
-
-    listPendingOneDriveConflicts(): Array<{ path: string; localCopyPath: string; remoteEtag: string; copyEtag: string; trustedScope: boolean }> {
-        const settings = this.settings();
-        const source = settings.pendingConflicts || {};
-        if (!source || typeof source !== "object" || Array.isArray(source)) return [];
-        const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
-        return Object.entries(source).map(([path, value]) => {
-            const item = value as any;
-            return {
-                path, localCopyPath: String(item?.localCopyPath || ""),
-                remoteEtag: String(item?.remoteEtag || ""),
-                copyEtag: String(item?.remoteCopyEtag || ""),
-                trustedScope: this.canRun() && !!accountId && item?.accountId === accountId
-                    && item?.vaultId === settings.vaultId && item?.deviceId === settings.deviceId,
-            };
-        });
-    }
-
-    private async capturePendingConflictReview(
-        path: string, resumedReadOnly = false,
-        resumedOperation?: RunTicket,
-    ): Promise<ConflictReviewState> {
-        const settings = this.settings();
-        const marker = settings.pendingConflicts?.[path];
-        const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
-        const permitted = this.canRun()
-            || (resumedReadOnly && this.resumedHistoricalIdentityTrusted())
-            || this.resumedProtectedActionAllowed(resumedOperation, path, "CONFLICT_KEEP_BOTH");
-        if (!permitted || this.running || !accountId ||
-            !marker || typeof path !== "string" || !path ||
-            path.startsWith("/") || path.includes("\\") ||
-            path.split("/").some((part) => !part || part === "." || part === "..") ||
-            marker.accountId !== accountId || marker.vaultId !== settings.vaultId ||
-            marker.deviceId !== settings.deviceId || !marker.remoteId ||
-            !marker.remoteEtag || !marker.remoteCopyId || !marker.remoteCopyEtag ||
-            !marker.localHash || !marker.localCopyPath ||
-            marker.localCopyPath === path || marker.localCopyPath.includes("\\") ||
-            !marker.localCopyPath.includes(".conflict-") ||
-            marker.localCopyPath.split("/").some((part: string) => !part || part === "." || part === "..") ||
-            settings.pendingDeletions?.[path]) {
-            throw new Error("未决冲突身份、路径或授权不可信，保留冲突锁");
-        }
-        const old = settings.fileStates?.[path];
-        if (!old || old.remoteId !== marker.remoteId || !old.localHash) {
-            throw new Error("冲突之前的可信同步基线不存在，拒绝解除锁");
-        }
-        const original = this.app.vault.getAbstractFileByPath(path);
-        const copy = this.app.vault.getAbstractFileByPath(marker.localCopyPath);
-        if (!(original instanceof TFile) || !(copy instanceof TFile)) {
-            throw new Error("当前原稿或本地冲突副本已消失，保留冲突锁");
-        }
-        const originalBytes = await this.readPhysicalBinary(path);
-        const preservedBytes = await this.readPhysicalBinary(marker.localCopyPath);
-        const originalHash = await this.sha256Bytes(originalBytes);
-        const copyHash = await this.sha256Bytes(preservedBytes);
-        if (copyHash !== marker.localHash) {
-            throw new Error("本地冲突副本字节已变化，保留冲突锁");
-        }
-        const remote = await this.remoteFiles(true, true);
-        const source = remote.find((item) => item.path === path);
-        const counterpart = remote.find((item) => item.path === marker.localCopyPath);
-        if (!source || !counterpart ||
-            source.id !== marker.remoteId || source.etag !== marker.remoteEtag ||
-            counterpart.id !== marker.remoteCopyId || counterpart.etag !== marker.remoteCopyEtag) {
-            throw new Error("云端冲突原稿或副本 Item ID/ETag 已变化，拒绝旧确认");
-        }
-        const remoteOriginal = await this.remoteBytes(source);
-        const remoteCopy = await this.remoteBytes(counterpart);
-        const needsLocalUpdate = !sameBytes(originalBytes, remoteOriginal);
-        const canFinishAndroid = Platform.isAndroidApp && sameBytes(originalBytes, preservedBytes);
-        if ((!canFinishAndroid && needsLocalUpdate) || !sameBytes(preservedBytes, remoteCopy)) {
-            throw new Error("冲突两端的物理字节与已保存副本不一致，拒绝解除锁");
-        }
-        if (!(this.canRun() ||
-                (resumedReadOnly && this.resumedHistoricalIdentityTrusted()) ||
-                this.resumedProtectedActionAllowed(resumedOperation, path, "CONFLICT_KEEP_BOTH")) ||
-            accountId !== String((this.store as any).settings.local.microsoftAccountId || "") ||
-            settings !== this.settings() || JSON.stringify(marker) !== JSON.stringify(settings.pendingConflicts?.[path])) {
-            throw new Error("冲突复核期间许可或身份已变化，保留冲突锁");
-        }
-        return {
-            path, accountId, vaultId: settings.vaultId, deviceId: settings.deviceId,
-            markerDigest: JSON.stringify(marker), baselineDigest: JSON.stringify(old),
-            originalLocalHash: originalHash, originalLocalMtime: original.stat.mtime,
-            originalLocalSize: original.stat.size, localCopyHash: copyHash,
-            localCopyMtime: copy.stat.mtime, localCopySize: copy.stat.size,
-            originalRemoteId: source.id, originalRemoteEtag: source.etag,
-            originalRemoteHash: await this.sha256Bytes(remoteOriginal),
-            copyRemoteId: counterpart.id, copyRemoteEtag: counterpart.etag,
-            copyRemoteHash: await this.sha256Bytes(remoteCopy),
-            copyPath: marker.localCopyPath,
-            needsLocalUpdate,
-        };
-    }
-
-    async prepareOneDriveConflictReview(
-        path: string, resumedOperation?: RunTicket,
-    ): Promise<OneDriveConflictReview> {
-        if (this.conflictReviewInFlight) throw new Error("另一条冲突正在复核");
-        if (resumedOperation &&
-            !this.resumedProtectedActionAllowed(resumedOperation, path, "CONFLICT_KEEP_BOTH")) {
-            throw new Error("重启后冲突复核不属于当轮独立确认的路径和权限");
-        }
-        const operation = resumedOperation || this.authority.start(this.settings(), this.contextKey());
-        const scope = this.contextKey();
-        try {
-            const snapshot = await this.capturePendingConflictReview(path, false, resumedOperation);
-            this.assertCurrent(operation);
-            if (scope !== this.contextKey()) throw new Error("复核身份已变化");
-            const ticket = Object.freeze({});
-            const expiresAt = Date.now() + 5 * 60_000;
-            this.conflictReviewTickets.set(ticket, {
-                path, snapshot: JSON.stringify(snapshot), expiresAt,
-            });
-            return {
-                ticket, path, accountId: snapshot.accountId, vaultId: snapshot.vaultId,
-                localCopyPath: snapshot.copyPath,
-                originalEtag: snapshot.originalRemoteEtag, copyEtag: snapshot.copyRemoteEtag,
-                originalHash: snapshot.originalLocalHash, preservedHash: snapshot.localCopyHash,
-                expiresAt, needsLocalUpdate: snapshot.needsLocalUpdate,
-            };
-        } finally {
-            if (!resumedOperation) this.authority.finishFinal(operation);
-        }
-    }
-
-    async confirmOneDriveConflictReview(
-        ticket: object, approved = false, resumedOperation?: RunTicket,
-    ): Promise<boolean> {
-        const prepared = ticket && typeof ticket === "object"
-            ? this.conflictReviewTickets.get(ticket) : undefined;
-        // Every attempt consumes the preview, including rejection and failure.
-        if (ticket && typeof ticket === "object") this.conflictReviewTickets.delete(ticket);
-        if (!approved) return false;
-        if (!prepared || prepared.expiresAt <= Date.now() ||
-            this.conflictReviewInFlight || this.running ||
-            !(this.canRun() ||
-                this.resumedProtectedActionAllowed(resumedOperation, prepared.path, "CONFLICT_KEEP_BOTH"))) {
-            throw new Error("本次冲突确认无效、已过期或正在处理，保留原未决锁");
-        }
-        this.conflictReviewInFlight = true;
-        let operation: RunTicket | null = null;
-        try {
-            const settings = this.settings();
-            operation = resumedOperation || this.authority.start(settings, this.contextKey());
-            const snapshot = await this.capturePendingConflictReview(prepared.path, false, resumedOperation);
-            this.assertCurrent(operation);
-            if (prepared.snapshot !== JSON.stringify(snapshot) ||
-                prepared.expiresAt <= Date.now()) {
-                throw new Error("冲突预览后文件内容、来源身份或版本已变化，拒绝旧确认");
-            }
-            const original = this.app.vault.getAbstractFileByPath(prepared.path);
-            const copy = this.app.vault.getAbstractFileByPath(snapshot.copyPath);
-            if (!(original instanceof TFile) || !(copy instanceof TFile) ||
-                original.stat.mtime !== snapshot.originalLocalMtime ||
-                original.stat.size !== snapshot.originalLocalSize ||
-                copy.stat.mtime !== snapshot.localCopyMtime ||
-                copy.stat.size !== snapshot.localCopySize) {
-                throw new Error("冲突本地副本版本已变化，拒绝解除锁");
-            }
-            this.authority.beginFinal(operation);
-            if (snapshot.needsLocalUpdate) {
-                const source = await this.readRemoteFileMetadata(prepared.path);
-                if (!source || source.id !== snapshot.originalRemoteId || source.etag !== snapshot.originalRemoteEtag) {
-                    throw new Error("云端冲突原稿已修改，保留两份");
-                }
-                const expected = { file: original, path: prepared.path, mtime: snapshot.originalLocalMtime,
-                    size: snapshot.originalLocalSize };
-                const savedHash = await this.download(operation, source, prepared.path, expected, false,
-                    snapshot.originalLocalHash, snapshot.originalRemoteHash);
-                if (savedHash !== snapshot.originalRemoteHash) throw new Error("云端冲突原稿字节已变化");
-            }
-            const beforeStates = settings.fileStates;
-            const beforePending = settings.pendingConflicts;
-            const beforeStatus = settings.status;
-            const beforeError = settings.lastError;
-            const remaining = { ...(settings.pendingConflicts || {}) };
-            delete remaining[prepared.path];
-            settings.fileStates = {
-                ...(settings.fileStates || {}),
-                [prepared.path]: {
-                    localMtime: original.stat.mtime, localSize: original.stat.size,
-                    localHash: snapshot.originalRemoteHash,
-                    remoteId: snapshot.originalRemoteId,
-                    remoteEtag: snapshot.originalRemoteEtag,
-                },
-                [snapshot.copyPath]: {
-                    localMtime: copy.stat.mtime, localSize: copy.stat.size,
-                    localHash: snapshot.localCopyHash,
-                    remoteId: snapshot.copyRemoteId,
-                    remoteEtag: snapshot.copyRemoteEtag,
-                },
-            };
-            settings.pendingConflicts = remaining;
-            settings.status = "paused";
-            settings.lastError = "已明确确认两份原文完整保留，须重新手动同步核对后才能显示全部完成";
-            try {
-                await (this.store as any).save();
-                // The conflict copy was staged during preservation. Only this
-                // explicit keep-both decision has now persisted its verified
-                // independent copy SHA/ItemID/ETag baseline, so its already
-                // CLEANUP_VERIFIED journal may be released. Any UNKNOWN stage
-                // remains locked and cannot be silently promoted.
-                await this.clearVerifiedUploadLedger(settings.fileStates);
-            } catch (error) {
-                settings.fileStates = beforeStates;
-                settings.pendingConflicts = beforePending;
-                settings.status = beforeStatus;
-                settings.lastError = beforeError;
-                throw error;
-            }
-            this.notifyStatusChange();
-            return true;
-        } finally {
-            if (operation && !resumedOperation) this.authority.finishFinal(operation);
-            this.conflictReviewInFlight = false;
         }
     }
 
@@ -2076,8 +1765,7 @@ export class OneDriveSyncService {
                 record.accountId !== currentAccount ||
                 record.vaultId !== settings.vaultId ||
                 record.deviceId !== settings.deviceId ||
-                settings.pendingConflicts?.[path] ||
-                typeof path !== "string" || !path ||
+                                typeof path !== "string" || !path ||
                 path.startsWith("/") || path.split("/").some((part) =>
                     !part || part === "." || part === "..") ||
                 (!resumedApproved && Date.now() - record.requestedAt > 5 * 60 * 1000) ||
@@ -2158,66 +1846,46 @@ export class OneDriveSyncService {
                     if (this.deleteGuard && await this.deleteGuard(path)) {
                         throw new Error("文件受外部文件夹同步保护，本次 OneDrive 删除许可不得跨域生效");
                     }
-                    const androidTrashPath = Platform.isAndroidApp
-                        ? ".trash/smartmd-onedrive/" + crypto.randomUUID() + "/" + path
-                        : undefined;
-                    if (androidTrashPath) await this.ensureLocalFolder(androidTrashPath);
-                    await this.writeVerifiedRecovery(operation, path, approvedBytes, "vault", androidTrashPath);
-                    this.assertCurrent(operation);
-                    const nowData = await this.app.vault.readBinary(local.file);
-                    if ((await this.sha256Bytes(nowData)) !== record.localHash) {
-                        throw new Error("知识库原稿在冷备后变更，保留原件");
-                    }
-                    // A cloud object may reappear while the recovery copy is
-                    // saved; a stale missing-remote observation is not consent.
-                    const afterBackupRemote = await this.remoteFiles(true);
+                    const finalRemote = await this.remoteFiles(true);
                     this.assertCurrent(operation);
                     requireCurrentDeletionScope(path, record.direction);
-                    requireNoDeletionStorm(afterBackupRemote);
-                    const reappeared = afterBackupRemote.find((item) => item.path === path);
+                    requireNoDeletionStorm(finalRemote);
+                    const reappeared = finalRemote.find((item) => item.path === path);
                     if (reappeared || (this.deleteGuard && await this.deleteGuard(path))) {
-                        throw new Error("冷备期间云端原稿或跨模块保护发生变化，禁止本地删除");
+                        throw new Error("删除前云端原稿或跨模块保护发生变化，禁止本地删除");
                     }
                     this.assertCurrent(operation);
                     requireCurrentDeletionScope(path, record.direction);
-                    requireNoDeletionStorm(afterBackupRemote);
+                    requireNoDeletionStorm(finalRemote);
                     const currentLocal = this.app.vault.getAbstractFileByPath(path);
                     if (!(currentLocal instanceof TFile) || currentLocal !== local.file ||
                         local.file.stat.mtime !== record.localMtime ||
                         local.file.stat.size !== record.localSize ||
                         JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
-                        throw new Error("冷备后本机文件、版本或删除候选变化，旧确认失效");
+                        throw new Error("删除前本机文件、版本或删除候选变化，旧确认失效");
                     }
-                    if (!androidTrashPath && typeof this.app.vault.trash !== "function") {
+                    if (!Platform.isAndroidApp && typeof this.app.vault.trash !== "function") {
                         throw new Error("Obsidian原生回收站不可用，不执行危险删除");
                     }
                     // Full-list and cross-module checks can yield after the
-                    // first backup read. Re-read actual bytes after those
+                    // first content read. Re-read actual bytes after those
                     // awaits, including same-mtime/same-size local edits.
                     const finalBytes = await this.app.vault.readBinary(currentLocal);
                     const finalHash = await this.sha256Bytes(finalBytes);
                     this.assertCurrent(operation);
                     requireCurrentDeletionScope(path, record.direction);
-                    requireNoDeletionStorm(afterBackupRemote);
+                    requireNoDeletionStorm(finalRemote);
                     if (finalHash !== record.localHash ||
                         this.app.vault.getAbstractFileByPath(path) !== currentLocal ||
                         currentLocal.stat.mtime !== record.localMtime ||
                         currentLocal.stat.size !== record.localSize ||
                         JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
-                        throw new Error("最终清单核对后本机正文或删除候选已变化，保留原文与冷备");
+                        throw new Error("最终清单核对后本机正文或删除候选已变化，保留原文");
                     }
                     this.authority.beginFinal(operation);
-                    if (androidTrashPath) {
-                        await trashAndroidFile(this.app.vault, currentLocal, path, androidTrashPath, finalBytes, () => {
-                            this.assertCurrent(operation);
-                            if (JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record) ||
-                                JSON.stringify([settings.ignorePatterns || [], this.maxBytes()]) !== ruleScope) {
-                                throw new Error("安卓端删除候选变化，保留原文件");
-                            }
-                        }, () => requireCurrentDeletionScope(path, record.direction));
-                    } else {
-                        await this.app.vault.trash(local.file, true);
-                    }
+                    if (Platform.isAndroidApp) await this.app.vault.delete(currentLocal);
+                    else await this.app.vault.trash(currentLocal, true);
+                    if (await this.app.vault.adapter.exists(path)) throw new Error("本地原路径仍然存在，未完成同步删除");
                 } else {
                     throw new Error("未知删除方向");
                 }
@@ -2253,16 +1921,12 @@ export class OneDriveSyncService {
         await this.remoteFiles(true, true);
     }
 
-    private firstConflictPreservationRequested = false;
-    private firstConflictTickets = new WeakMap<object, { snapshot: string; expiresAt: number; operationId: string; generation: number }>();
-    private firstConflictInFlight = false;
     private identicalRegistrationRequested = false;
     private identicalRegistrationInFlight = false;
     private identicalRegistrationVerifiedId = "";
     private identicalRegistrationTickets = new WeakMap<object, { snapshot: string; expiresAt: number }>();
 
     private identicalRegistrationBlocked(): boolean {
-        if ((this.settings() as any).firstConflictPreservationJournal || this.firstConflictInFlight) return true;
         const record = this.settings().identicalRegistrationJournal;
         return this.identicalRegistrationInFlight || Boolean(record &&
             (record.phase !== "COMPLETED" || this.identicalRegistrationVerifiedId !== record.operationId));
@@ -2323,15 +1987,14 @@ export class OneDriveSyncService {
         });
     }
 
-    private async captureIdenticalRegistration(cloudVaultId: string, ownRecord?: any, allowDifferent = false): Promise<any> {
+    private async captureIdenticalRegistration(cloudVaultId: string, ownRecord?: any): Promise<any> {
         requireWindowsHost();
         const settings = this.settings();
         if (!(this.store as any).installationProofIsValid?.() || settings.runAllowed || settings.enabled ||
             (!ownRecord && (settings.confirmed || settings.firstSyncCompleted ||
                 Object.keys(settings.fileStates || {}).length || settings.confirmationAccountId || settings.confirmationVaultId)) ||
-            (ownRecord && (allowDifferent ? (settings as any).firstConflictPreservationJournal : settings.identicalRegistrationJournal) !== ownRecord) ||
-            ((settings as any).firstConflictPreservationJournal && (!allowDifferent || !ownRecord)) ||
-            Object.keys(settings.pendingUploadOperations || {}).length || Object.keys(settings.pendingConflicts || {}).length ||
+            (ownRecord && settings.identicalRegistrationJournal !== ownRecord) ||
+            Object.keys(settings.pendingUploadOperations || {}).length ||
             Object.keys(settings.pendingDeletions || {}).length || settings.pendingSharedUploadOperation ||
             settings.firstCommitJournal || settings.firstFileJournal ||
             ((this.store as any).settings.local.recoveryEntries || []).length) {
@@ -2394,7 +2057,7 @@ export class OneDriveSyncService {
                 if (localKeys.has(key)) throw new Error("本机存在路径碰撞，停止登记");
                 localKeys.add(key);
                 const peer = remoteMap.get(item.path);
-                if (!peer?.id || !peer.etag || (!allowDifferent && peer.size !== item.size)) throw new Error("存在单侧文件、大小差异或未知云端版本");
+                if (!peer?.id || !peer.etag || peer.size !== item.size) throw new Error("存在单侧文件、大小差异或未知云端版本");
                 const absolute = paths.resolve(root, item.path);
                 if (!absolute.toLowerCase().startsWith(root.toLowerCase() + "\\")) throw new Error("本机路径不在当前Vault内");
                 const fileStat = await fs.lstat(absolute);
@@ -2418,11 +2081,11 @@ export class OneDriveSyncService {
                 const b = await this.remoteBytes(peer);
                 assertPhysical(absolute, fileStat);
                 readProofs.push({ absolute, stat: fileStat });
-                if (a.byteLength !== item.size || b.byteLength !== peer.size || (!allowDifferent && !sameBytes(a, b)))
+                if (a.byteLength !== item.size || b.byteLength !== peer.size || !sameBytes(a, b))
                     throw new Error("双端内容不同或正文不可核实，禁止登记及覆盖");
                 files.push({ path: item.path, localMtime: item.mtime, localSize: item.size,
                     localHash: await this.sha256Bytes(a), remoteHash: await this.sha256Bytes(b),
-                    physicalIdentity: identity(fileStat), ...(allowDifferent ? {remoteSize: peer.size} : {}),
+                    physicalIdentity: identity(fileStat),
                     remoteId: peer.id, remoteEtag: peer.etag });
             }
             const result = { accountId, localVaultId, cloudVaultId, deviceId: settings.deviceId,
@@ -2434,223 +2097,6 @@ export class OneDriveSyncService {
             if (!this.identicalRegistrationIdentityMatches(result)) throw new Error("读取期间物理根或账号/设备发生变化");
             return result;
         } finally { this.previewVaultId = before; }
-    }
-
-    private firstConflictPhysicalPath(snapshot: any, relative: string, createParents = false): string {
-        this.assertIdenticalSnapshotPhysical(snapshot, false);
-        const fs = require("fs") as typeof import("fs");
-        const path = require("path").win32 as typeof import("path").win32;
-        if (!/^\.suite-recovery\/first-conflicts\/[a-zA-Z0-9_-]+\/[0-9]+-(local|cloud)\.bin$/.test(relative))
-            throw new Error("首次冲突恢复路径不可信");
-        const root = path.normalize(snapshot.physicalRoot);
-        let current = root;
-        const parts = relative.split("/");
-        for (const part of parts.slice(0, -1)) {
-            current = path.join(current, part);
-            if (!fs.existsSync(current) && createParents) fs.mkdirSync(current);
-            const stat = fs.lstatSync(current);
-            if (!stat.isDirectory() || stat.isSymbolicLink() ||
-                path.normalize(fs.realpathSync(current)).toLowerCase() !== current.toLowerCase())
-                throw new Error("恢复目录发生重定向，保留原件");
-        }
-        this.assertIdenticalSnapshotPhysical(snapshot, false);
-        return path.join(current, parts[parts.length - 1]);
-    }
-
-    private readFirstConflictPhysical(snapshot: any, relative: string, original = false): ArrayBuffer {
-        this.assertIdenticalSnapshotPhysical(snapshot, original);
-        const fs = require("fs") as typeof import("fs");
-        const path = require("path").win32 as typeof import("path").win32;
-        const target = original ? path.resolve(snapshot.physicalRoot, relative)
-            : this.firstConflictPhysicalPath(snapshot, relative);
-        const before = fs.lstatSync(target);
-        if (!before.isFile() || before.isSymbolicLink() ||
-            path.normalize(fs.realpathSync(target)).toLowerCase() !== path.normalize(target).toLowerCase())
-            throw new Error("首次冲突副本不是已核实的物理文件");
-        const fd = fs.openSync(target, "r");
-        try {
-            const opened = fs.fstatSync(fd);
-            if (opened.dev !== before.dev || opened.ino !== before.ino || opened.birthtimeMs !== before.birthtimeMs)
-                throw new Error("恢复文件在打开期间发生替换");
-            this.assertIdenticalSnapshotPhysical(snapshot, original);
-            return Uint8Array.from(fs.readFileSync(fd)).buffer;
-        } finally { fs.closeSync(fd); }
-    }
-
-    private async saveFirstConflictRecord(record: any, generation?: number): Promise<void> {
-        await (this.store as any).saveWithIdentityGuard(() => {
-            if ((generation !== undefined && generation !== this.resumedApprovalGeneration) ||
-                (this.settings() as any).firstConflictPreservationJournal !== record)
-                throw new Error("首次冲突原操作已变化");
-            this.assertIdenticalSnapshotPhysical(record.snapshot, false);
-        });
-    }
-
-    async prepareFirstConflictPreservation(cloudVaultId: string): Promise<any> {
-        if (!this.firstConflictPreservationRequested || this.pendingFirstChoice?.id !== cloudVaultId ||
-            this.firstConflictInFlight || this.running || (this.settings() as any).firstConflictPreservationJournal ||
-            this.settings().identicalRegistrationJournal) throw new Error("请从当前云库的首次冲突独立入口重新检查");
-        const generation = this.resumedApprovalGeneration;
-        this.firstConflictInFlight = true;
-        try {
-            const snapshot = await this.captureIdenticalRegistration(cloudVaultId, undefined, true);
-            if (generation !== this.resumedApprovalGeneration) throw new Error("首次冲突预览准备期间已暂停，必须重新检查");
-            const conflicts = snapshot.files.filter((f: any) => f.localHash !== f.remoteHash);
-            if (!conflicts.length) throw new Error("没有同路径异字节冲突；完全一致的内容请用同内容登记");
-            const ticket = Object.freeze({});
-            const operationId = "first-conflict-" + crypto.randomUUID();
-            this.firstConflictTickets.set(ticket, { snapshot: JSON.stringify(snapshot), expiresAt: Date.now() + 300000, operationId, generation });
-            return { ticket, ...snapshot, conflicts: conflicts.map((f: any, index: number) => ({ ...f,
-                localCopyPath: `.suite-recovery/first-conflicts/${operationId}/${index}-local.bin`,
-                cloudCopyPath: `.suite-recovery/first-conflicts/${operationId}/${index}-cloud.bin`,
-            })) };
-        } finally { this.firstConflictInFlight = false; }
-    }
-
-    async confirmFirstConflictPreservation(ticket: object, approved = false): Promise<boolean> {
-        const issued = this.firstConflictTickets.get(ticket);
-        this.firstConflictTickets.delete(ticket);
-        if (!approved) return false;
-        if (!issued || issued.generation !== this.resumedApprovalGeneration || issued.expiresAt <= Date.now() || this.firstConflictInFlight || this.running ||
-            (this.settings() as any).firstConflictPreservationJournal) throw new Error("首次冲突预览已失效或原操作尚未核实");
-        this.firstConflictInFlight = true;
-        const settings = this.settings();
-        const generation = this.resumedApprovalGeneration;
-        const requireCurrent = (snapshot: any) => {
-            if (generation !== this.resumedApprovalGeneration || settings !== this.settings())
-                throw new Error("首次冲突保全已暂停或撤销，停止新增副本");
-            this.assertIdenticalSnapshotPhysical(snapshot);
-        };
-        let record: any;
-        try {
-            const snapshot = await this.captureIdenticalRegistration(JSON.parse(issued.snapshot).cloudVaultId, undefined, true);
-            if (JSON.stringify(snapshot) !== issued.snapshot || issued.expiresAt <= Date.now())
-                throw new Error("账号、清单、物理根、本机SHA或云端版本已变，旧确认拒止");
-            requireCurrent(snapshot);
-            const operationId = issued.operationId;
-            record = { operationId, snapshot, phase: "PREPARED", createdAt: Date.now(), entries:
-                snapshot.files.filter((f: any) => f.localHash !== f.remoteHash).map((file: any, index: number) => ({
-                    ...file, localCopyPath: `.suite-recovery/first-conflicts/${operationId}/${index}-local.bin`,
-                    cloudCopyPath: `.suite-recovery/first-conflicts/${operationId}/${index}-cloud.bin`, verified: false,
-                })) };
-            (settings as any).firstConflictPreservationJournal = record;
-            settings.runAllowed = false; settings.enabled = false; settings.firstSyncCompleted = false;
-            settings.status = "paused";
-            await this.saveFirstConflictRecord(record, generation); // Durable original operation before any copy.
-            for (const entry of record.entries) {
-                const local = this.readFirstConflictPhysical(snapshot, entry.path, true);
-                const remote = { id: entry.remoteId, etag: entry.remoteEtag, size: entry.remoteSize,
-                    path: entry.path, name: entry.path.split("/").pop() };
-                const cloud = await this.remoteBytes(remote);
-                requireCurrent(snapshot);
-                if (await this.sha256Bytes(local) !== entry.localHash || await this.sha256Bytes(cloud) !== entry.remoteHash)
-                    throw new Error("首次冲突源版本变化，保留原件与已写副本");
-                const beforePreview = this.previewVaultId; this.previewVaultId = snapshot.cloudVaultId;
-                try {
-                    const meta = await this.readRemoteFileMetadata(entry.path);
-                    if (!meta || meta.id !== entry.remoteId || meta.etag !== entry.remoteEtag)
-                        throw new Error("云端冲突版本已变化，拒绝旧确认");
-                } finally { this.previewVaultId = beforePreview; }
-                for (const [relative, data, expected] of [[entry.localCopyPath, local, entry.localHash],
-                    [entry.cloudCopyPath, cloud, entry.remoteHash]] as [string, ArrayBuffer, string][]) {
-                    requireCurrent(snapshot);
-                    // Re-read original bytes after asynchronous checks, before dispatching any copy.
-                    if (await this.sha256Bytes(this.readFirstConflictPhysical(snapshot, entry.path, true)) !== entry.localHash)
-                        throw new Error("本机原文已变化，停止保存旧冲突副本");
-                    const target = this.firstConflictPhysicalPath(snapshot, relative, true);
-                    const fs = require("fs") as typeof import("fs");
-                    requireCurrent(snapshot);
-                    fs.writeFileSync(target, new Uint8Array(data), { flag: "wx" });
-                    if (await this.sha256Bytes(this.readFirstConflictPhysical(snapshot, relative)) !== expected)
-                        throw new Error("冲突副本实际读回不一致，不能声称已保全");
-                }
-                entry.verified = true;
-                await this.saveFirstConflictRecord(record, generation);
-            }
-            // Full inventory/version recheck after physical preservation; never mark stale copies as current success.
-            if (JSON.stringify(await this.captureIdenticalRegistration(snapshot.cloudVaultId, record, true)) !== issued.snapshot)
-                throw new Error("保存期间双端范围或版本改变，原操作保留待核实");
-            record.phase = "BOTH_VERIFIED";
-            settings.lastError = "首次冲突两版已分别读回，双方原路径保持；尚未绑定或解决冲突，只可核验与导出。";
-            await this.saveFirstConflictRecord(record, generation);
-            const persisted = await (this.store as any).readPersistedOneDriveRegistrationState(() =>
-                this.assertIdenticalSnapshotPhysical(snapshot, false));
-            if (JSON.stringify(persisted?.oneDrive?.firstConflictPreservationJournal) !== JSON.stringify(record) ||
-                persisted.oneDrive.firstSyncCompleted || persisted.oneDrive.runAllowed || persisted.oneDrive.enabled)
-                throw new Error("冲突保全回执尚未实际持久核实");
-            requireCurrent(snapshot);
-            return true;
-        } catch (error) {
-            if (record && settings === this.settings()) {
-                record.phase = "RECONCILE_REQUIRED";
-                settings.firstSyncCompleted = false; settings.runAllowed = false; settings.enabled = false;
-                settings.status = "paused"; settings.lastError = "首次冲突保全未完成，保留原操作和已有副本；请只读核验，不重建或覆盖。";
-                try { await this.saveFirstConflictRecord(record); } catch {}
-            }
-            throw error;
-        } finally { this.firstConflictInFlight = false; }
-    }
-
-    async inspectFirstConflictPreservation(): Promise<any> {
-        const record = (this.settings() as any).firstConflictPreservationJournal;
-        if (!record || this.firstConflictInFlight) throw new Error("没有可核验的首次冲突原操作");
-        this.assertIdenticalSnapshotPhysical(record.snapshot, false);
-        const entries = [];
-        for (const entry of record.entries) {
-            let localVerified = false, cloudVerified = false;
-            try { localVerified = await this.sha256Bytes(this.readFirstConflictPhysical(record.snapshot, entry.localCopyPath)) === entry.localHash; } catch {}
-            try { cloudVerified = await this.sha256Bytes(this.readFirstConflictPhysical(record.snapshot, entry.cloudCopyPath)) === entry.remoteHash; } catch {}
-            entries.push({ ...entry, localVerified, cloudVerified });
-        }
-        this.assertIdenticalSnapshotPhysical(record.snapshot, false);
-        return { operationId: record.operationId, phase: record.phase, entries };
-    }
-
-    async exportFirstConflictVersion(path: string, version: "local" | "cloud"): Promise<string> {
-        const record = (this.settings() as any).firstConflictPreservationJournal;
-        if (!record || this.firstConflictInFlight) throw new Error("首次冲突原操作不可用");
-        const entry = record.entries.find((f: any) => f.path === path);
-        if (!entry || !["local", "cloud"].includes(version)) throw new Error("未批准的恢复版本");
-        const data = this.readFirstConflictPhysical(record.snapshot, version === "local" ? entry.localCopyPath : entry.cloudCopyPath);
-        if (await this.sha256Bytes(data) !== (version === "local" ? entry.localHash : entry.remoteHash))
-            throw new Error("原恢复副本不可读或SHA不符，禁止导出");
-        const fs = require("fs") as typeof import("fs");
-        const paths = require("path").win32 as typeof import("path").win32;
-        const extension = paths.extname(path).replace(/[^.a-zA-Z0-9]/g, "");
-        const output = "first-conflict-export-" + crypto.randomUUID() + "-" + version + extension;
-        this.assertIdenticalSnapshotPhysical(record.snapshot, false);
-        const target = paths.join(record.snapshot.physicalRoot, output);
-        fs.writeFileSync(target, new Uint8Array(data), { flag: "wx" });
-        this.assertIdenticalSnapshotPhysical(record.snapshot, false);
-        if (await this.sha256Bytes(Uint8Array.from(fs.readFileSync(target)).buffer) !== (version === "local" ? entry.localHash : entry.remoteHash))
-            throw new Error("导出文件实际读回不符，原副本继续保留");
-        return output;
-    }
-
-    private async performFirstConflictPreservationPreview(cloudVaultId: string): Promise<boolean> {
-        const preview = await this.prepareFirstConflictPreservation(cloudVaultId);
-        return await new Promise<boolean>((resolve) => {
-            const modal = new Modal(this.app); let decided = false;
-            modal.onOpen = () => {
-                modal.titleEl.setText(localize("首次冲突：仅在本机保留两版"));
-                modal.contentEl.createEl("p", { text: localize("账号 {0}；本地库 {1}；云库 {2}。上传0、覆盖0、删除0；仅保存以下两版恢复副本，不绑定或开启同步。未冲突项不传输。", preview.accountId, preview.localVaultId, preview.cloudVaultId) });
-                modal.contentEl.createEl("p", { text: localize("完整适用范围 ") + preview.files.length + localize(" 项；冲突 ") + preview.conflicts.length +
-                    localize(" 项；上传 0 项；原路径落地下载/覆盖 0 项；远程只读读取用于比对，确认后仅保存双版恢复副本。") });
-                for (const f of preview.conflicts) modal.contentEl.createEl("p", { text: f.path +
-                    localize("；本地SHA ") + f.localHash + localize("；云端SHA ") + f.remoteHash + "；Item ID " + f.remoteId + "；ETag " + f.remoteEtag +
-                    localize("；拟保全本地版 ") + f.localCopyPath + localize("；拟保全云端版 ") + f.cloudCopyPath + localize("（确认前尚不存在）") });
-                modal.contentEl.createEl("button", { text: localize("取消，保持零写入") }).onclick = () => modal.close();
-                modal.contentEl.createEl("button", { text: localize("独立确认，仅保存上述两版") }).onclick = async () => {
-                    if (decided) return; decided = true;
-                    try { await this.confirmFirstConflictPreservation(preview.ticket, true); resolve(false); }
-                    catch (error) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); resolve(false); }
-                    finally { modal.close(); }
-                };
-            };
-            modal.onClose = () => { if (!decided) { decided = true;
-                void this.confirmFirstConflictPreservation(preview.ticket, false); resolve(false); } modal.contentEl.empty(); };
-            modal.open();
-        });
     }
 
     async prepareIdenticalOneDriveRegistration(cloudVaultId: string): Promise<any> {
@@ -3079,10 +2525,6 @@ export class OneDriveSyncService {
 
     private async performManualSync(): Promise<boolean> {
         const settings = this.settings();
-        if ((settings as any).firstConflictPreservationJournal) {
-            new Notice(localize("首次冲突原操作待处理；只可核验/导出两版，不会绑定或传输正文。"), 8000);
-            return false;
-        }
         if (settings.identicalRegistrationJournal && !settings.firstSyncCompleted &&
             !((this.store as any).settings.local.oneDriveScopeIsolation && settings.identicalRegistrationJournal.phase === "COMPLETED")) {
             new Notice(localize("原同内容登记待核实；请先核验原操作，不会新建另一登记或传输正文。"), 8000);
@@ -3124,7 +2566,6 @@ export class OneDriveSyncService {
             const choice = this.pendingFirstChoice;
             if (!choice) return false;
             this.previewVaultId = choice.id;
-            if (this.firstConflictPreservationRequested) return await this.performFirstConflictPreservationPreview(choice.id);
             if (this.identicalRegistrationRequested) return await this.performIdenticalRegistrationPreview(choice.id);
             await this.assertFirstReceiverIdentity(choice, initialAccount);
             const prepared = await this.captureFirstConnectionSnapshot();
@@ -3149,7 +2590,6 @@ export class OneDriveSyncService {
             const uploadPaths = local.filter((item) => !remoteMap.has(item.path)).map((item) => item.path).sort();
             const downloadPaths = remote.filter((item) => !localPaths.has(item.path)).map((item) => item.path).sort();
             const samePaths: string[] = [];
-            const conflictPaths: string[] = [];
             const unknownPaths: string[] = [];
             for (const item of local) {
                 const counterpart = remoteMap.get(item.path);
@@ -3157,7 +2597,9 @@ export class OneDriveSyncService {
                 try {
                     const localContent = await this.app.vault.readBinary(item.file);
                     const remoteContent = await this.remoteBytes(counterpart);
-                    (sameBytes(localContent, remoteContent) ? samePaths : conflictPaths).push(item.path);
+                    if (sameBytes(localContent, remoteContent)) samePaths.push(item.path);
+                    else if (await this.oneDriveVersionWins(item.path, item.mtime, counterpart)) downloadPaths.push(item.path);
+                    else uploadPaths.push(item.path);
                 } catch {
                     // A failed content read is UNKNOWN, never "same" or a harmless zero-difference.
                     unknownPaths.push(item.path);
@@ -3210,10 +2652,9 @@ export class OneDriveSyncService {
                 remoteCount: remote.length,
                 uploadCount: uploadPaths.length,
                 downloadCount: downloadPaths.length,
-                possibleConflicts: conflictPaths.length,
                 skippedCount: skippedPaths.length,
                 uploadPaths, downloadPaths, samePaths: samePaths.sort(),
-                conflictPaths: conflictPaths.sort(), skippedPaths,
+                skippedPaths,
                 unknownPaths: unknownPaths.sort(),
                 unexpectedNewTarget: choice.mode === "new" && allRemote.length > 0,
                 identity: { accountId: initialAccount,
@@ -3231,9 +2672,9 @@ export class OneDriveSyncService {
                         if (choice.mode === "existing") {
                             await this.assertFirstReceiverIdentity(choice, initialAccount);
                             if (resumingReceiver) {
-                                if (preview.uploadCount || preview.possibleConflicts ||
+                                if (preview.uploadCount ||
                                     preview.unknownPaths.length) {
-                                    throw new Error("首次接收续传还有未经批准的上传或冲突，原文保持不变");
+                                    throw new Error("首次接收续传还有未经批准的上传或尚未核实的文件");
                                 }
                                 await this.assertIncompleteFirstReceiverFiles(
                                     initialAccount, choice.id, local, allRemote, true);
@@ -3388,7 +2829,6 @@ export class OneDriveSyncService {
             const settings = this.settings();
             // An unresolved conflict already retained both versions. Vault writes from
             // that preservation must not start another copy/overwrite cycle.
-            if (settings.status === "paused" && Number(settings.lastSyncSummary?.conflicts || 0) > 0) return false;
             if (settings.status !== "ready") return true; // Preserve other failure/recovery behavior.
             const states = settings.fileStates || {};
             const local = this.localFiles();
@@ -3513,10 +2953,10 @@ export class OneDriveSyncService {
     async enableAutoSync(): Promise<void> {
         const settings = this.settings();
         if (!settings.firstSyncCompleted) throw new Error("首次手动同步成功后才能启用自动同步。");
-        if (this.isBusy() || Object.keys(settings.pendingConflicts || {}).length ||
+        if (this.isBusy() ||
             Object.keys(settings.pendingDeletions || {}).length ||
             Object.keys(settings.pendingUploadOperations || {}).length) {
-            throw new Error("仍有同步作业或未决冲突、删除、上传日志；须完成后才能开启自动同步");
+            throw new Error("仍有同步作业、删除或上传日志；须完成后才能开启自动同步");
         }
         if (!this.canRun()) {
             throw new Error("本轮同步执行许可已失效。请先重新只读核对账号、云库、版本和文件范围并明确批准；切换自动同步方式不能恢复旧许可。");
@@ -3609,21 +3049,6 @@ export class OneDriveSyncService {
             }
             const remote = allRemote.filter((item) => !skippedPaths.has(item.path) && !this.isIgnored(item.path));
             const previous = settings.fileStates || {};
-            const pendingConflicts = settings.pendingConflicts || {};
-            if (typeof pendingConflicts !== "object" || Array.isArray(pendingConflicts)) {
-                throw new Error("未决冲突记录无效，已停止同步，不允许重新覆盖");
-            }
-            const heldCopies = new Set<string>();
-            const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
-            for (const [path, marker] of Object.entries(pendingConflicts) as [string, any][]) {
-                if (!marker || typeof marker !== "object"
-                    || marker.accountId !== accountId || marker.vaultId !== settings.vaultId
-                    || marker.deviceId !== settings.deviceId || !marker.localCopyPath
-                    || marker.localCopyPath === path) {
-                    throw new Error("未决冲突来源或所属账号不可信，禁止自动处理");
-                }
-                heldCopies.add(marker.localCopyPath);
-            }
             const remoteLooksIncomplete = !firstSync
                 && Object.values(previous).some((item: any) => Boolean(item?.remoteId))
                 && remote.length === 0;
@@ -3639,7 +3064,7 @@ export class OneDriveSyncService {
             if (bothMissing) {
                 throw new Error("历史文件两端同时缺失，尚无法核实删除意图，已保留原同步基线并暂停");
             }
-            const allPaths = new Set([...localMap.keys(), ...remoteMap.keys(), ...Object.keys(previous).filter((path) => !skippedPaths.has(path) && !this.isIgnored(path)), ...Object.keys(pendingConflicts)]);
+            const allPaths = new Set([...localMap.keys(), ...remoteMap.keys(), ...Object.keys(previous).filter((path) => !skippedPaths.has(path) && !this.isIgnored(path)), ]);
             // Skipping an ignored or oversized path is not evidence that its
             // historical local/remote file was deleted. Preserve the last
             // trusted baseline so re-enabling it cannot manufacture a fresh
@@ -3725,8 +3150,6 @@ export class OneDriveSyncService {
 
             let processingIndex = 0;
             let deletionPaused = 0;
-            let unresolvedConflicts = 0;
-            const unresolvedPaths = new Set<string>();
             let successCount = 0;
             let unchangedCount = 0;
             const startTime = Date.now();
@@ -3754,19 +3177,6 @@ export class OneDriveSyncService {
                 const localItem = localMap.get(path);
                 const remoteItem = remoteMap.get(path);
                 const old = previous[path];
-                if (pendingConflicts[path]) {
-                    // A protected pair has not been resolved by the user. Manual
-                    // retry and startup must not manufacture more copies or
-                    // advance the old, trusted SHA/ETag baseline.
-                    if (old) next[path] = { ...old };
-                    else delete next[path];
-                    unresolvedPaths.add(path);
-                    unresolvedConflicts++;
-                    continue;
-                }
-                // Conflict copies are recovery evidence, not newly authorized
-                // files to re-upload or merge during an unresolved sync.
-                if (heldCopies.has(path)) continue;
                 if (localItem && remoteItem) delete settings.pendingDeletions[path];
 
                 try {
@@ -3826,25 +3236,11 @@ export class OneDriveSyncService {
                                     legacySame = sameBytes(localBytes,
                                         await this.remoteBytes(remoteItem));
                                 }
-                                const localChanged = !old
-                                    || old.localMtime !== localItem.mtime
-                                    || old.localSize !== localItem.size
-                                    || (old.localHash
-                                        ? old.localHash !== currentLocalHash : !legacySame);
-                                if (firstSync && !old) {
-                                    if (firstSyncMatches.get(path) === false) {
-                                        await this.assertFresh(operation, path, localItem, remoteItem);
-                                        await this.preserveConflict(operation, localItem, remoteItem);
-                                            // A preserved copy is NOT a resolved conflict.
-                                        // Do not advance the baseline to unapproved versions.
-                                        delete next[path];
-                                        unresolvedPaths.add(path);
-                                        await flushIfNeeded();
-                                        unresolvedConflicts++;
-                                        lastAttemptError = null;
-                                        break;
-                                    }
+                                const localChanged = !old ||
+                                    (old.localHash ? old.localHash !== currentLocalHash : !legacySame);
+                                if (firstSync && !old && firstSyncMatches.get(path) === true) {
                                     next[path] = {
+                                        localHash: currentLocalHash,
                                         localMtime: localItem.mtime,
                                         localSize: localItem.size,
                                         remoteEtag: remoteItem.etag,
@@ -3852,18 +3248,6 @@ export class OneDriveSyncService {
                                     };
                                     await flushIfNeeded();
                                     unchangedCount++;
-                                    lastAttemptError = null;
-                                    break;
-                                }
-                                if (old && localChanged && remoteChanged) {
-                                    await this.assertFresh(operation, path, localItem, remoteItem);
-                                    await this.preserveConflict(operation, localItem, remoteItem);
-                                    // Keep the last verified baseline until the user
-                                    // resolves both versions; do not mark success.
-                                    next[path] = { ...old };
-                                    unresolvedPaths.add(path);
-                                    await flushIfNeeded();
-                                    unresolvedConflicts++;
                                     lastAttemptError = null;
                                     break;
                                 }
@@ -3883,10 +3267,32 @@ export class OneDriveSyncService {
                                 let resultingEtag = remoteItem.etag;
                                 let resultingId = remoteItem.id;
                                 let resultingHash = currentLocalHash;
-                                if (remoteChanged && !localChanged) {
+                                let takeCloud = remoteChanged && !localChanged;
+                                if (localChanged && remoteChanged) {
+                                    const peer = await this.remoteBytes(remoteItem);
+                                    if (sameBytes(localBytes, peer)) {
+                                        await this.assertFresh(operation, path, localItem, remoteItem);
+                                        if (!sameBytes(await this.app.vault.readBinary(localItem.file), localBytes)) {
+                                            throw new Error(localize("本机文件在同步时变化，请重新同步。"));
+                                        }
+                                        next[path] = {
+                                            localMtime: localItem.mtime, localSize: localItem.size,
+                                            remoteEtag: remoteItem.etag, remoteId: remoteItem.id,
+                                            localHash: currentLocalHash,
+                                        };
+                                        await flushIfNeeded();
+                                        unchangedCount++;
+                                        lastAttemptError = null;
+                                        break;
+                                    }
+                                    takeCloud = (!old?.localHash || await this.sha256Bytes(peer) !== old.localHash)
+                                        && await this.oneDriveVersionWins(path, localItem.mtime, remoteItem);
+                                }
+                                if (takeCloud) {
                                     resultingHash = await this.download(operation, remoteItem, path, localItem, false, currentLocalHash);
                                 } else if (localChanged || firstSync) {
                                     const data = await this.app.vault.readBinary(localItem.file);
+                                    if (!sameBytes(data, localBytes)) throw new Error(localize("本机文件在同步时变化，请重新同步。"));
                                     await this.assertFresh(operation, path, localItem, remoteItem);
                                     const uploaded = await this.uploadStaged(operation, path, data, false, remoteItem);
                                     resultingEtag = uploaded.eTag || uploaded.cTag || resultingEtag;
@@ -3928,7 +3334,8 @@ export class OneDriveSyncService {
                                 const data = await this.app.vault.readBinary(localItem.file);
                                 let uploaded: any;
                                 if (firstSync) {
-                                    uploaded = await this.upload(path, data, false, null);
+                                    uploaded = await this.upload(path, data, false, null, operation, undefined, undefined, readMtime);
+                                    uploaded = await this.setUploadedModificationTime(uploaded, readMtime, operation);
                                 } else {
                                     await this.assertFresh(operation, path, localItem, undefined);
                                     uploaded = await this.uploadStaged(operation, path, data, false, null);
@@ -3998,7 +3405,7 @@ export class OneDriveSyncService {
                         }
                     }
                     if (lastAttemptError) throw lastAttemptError;
-                    if (next[path] && next[path] !== old && !next[path].localHash && !unresolvedPaths.has(path)) {
+                    if (next[path] && next[path] !== old && !next[path].localHash) {
                         const current = this.app.vault.getAbstractFileByPath(path);
                         if (current instanceof TFile) {
                             next[path].localHash = await this.sha256Bytes(
@@ -4037,7 +3444,7 @@ export class OneDriveSyncService {
                 success: successCount,
                 failed: failedCount,
                 unchanged: unchangedCount,
-                conflicts: unresolvedConflicts,
+                conflicts: 0,
                 durationMs,
                 finishedAt: Date.now(),
             };
@@ -4065,11 +3472,10 @@ export class OneDriveSyncService {
                 }
             }
 
-            if (deletionPaused || unresolvedConflicts) {
+            if (deletionPaused) {
                 settings.fileStates = this.mergePendingUploadBaselines(next);
                 settings.status = "paused";
                 const unresolvedReasons = [
-                    unresolvedConflicts ? `${unresolvedConflicts} 项冲突版本已保留但尚未解决，请查看双方副本后重新确认。` : "",
                     deletionPaused ? (stormReason || (this.listAndroidRetainedDeletionPaths().length
                         ? "云端缺失但安卓有未同步或未经校验的版本，已保留本机笔记以供核对。"
                         : "") ||
@@ -4331,11 +3737,9 @@ export class OneDriveSyncService {
     }
 
     private isIgnored(path: string): boolean {
-        // Exported recovery notes and locally staged download-conflict copies
-        // are safety artifacts, not newly authored notes. Never send them as
-        // ordinary uploads merely because the user resumes daily sync.
+        // Keep historical recovery files out of ordinary sync.
         if (path.startsWith("OneDrive恢复的笔记/") ||
-            /\.conflict-OneDrive-\d{4}-\d{2}-\d{2}T[\d-]+Z(?:\.[^/]+)?$/.test(path)) {
+            /\.conflict-[^/]+-\d{4}-\d{2}-\d{2}T[\d-]+Z(?:\.[^/]+)?$/.test(path)) {
             return true;
         }
         return (this.settings().ignorePatterns || []).map(ignoreMatcher).some((pattern: RegExp) => pattern.test(path));
@@ -4444,7 +3848,6 @@ export class OneDriveSyncService {
             Object.keys(s.fileStates || {}).length ||
             Object.keys(s.pendingUploadOperations || {}).length ||
             Object.keys(s.pendingDeletions || {}).length ||
-            Object.keys(s.pendingConflicts || {}).length ||
             s.androidFirstDownload ||
             (local.recoveryEntries || []).length ||
             typeof (this.store as any).installationProofIsValid !== "function" ||
@@ -4710,7 +4113,6 @@ export class OneDriveSyncService {
         // Discovery is deliberately read-only; in-memory selections are not durable binding.
         this.pendingFirstChoice = null;
         this.identicalRegistrationRequested = false;
-        this.firstConflictPreservationRequested = false;
         const settings = this.settings();
         if (settings.firstSyncCompleted) return this.canRun();
         const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
@@ -4772,7 +4174,6 @@ export class OneDriveSyncService {
             if (!match) throw new Error("云端知识库选择已过期，需重新检查。");
             this.pendingFirstChoice = { id: match.id, name: match.name, mode: "existing" };
             this.identicalRegistrationRequested = choice.registerIdentical === true;
-            this.firstConflictPreservationRequested = choice.preserveFirstConflicts === true;
         }
         return true;
     }
@@ -5399,6 +4800,7 @@ export class OneDriveSyncService {
                 this.assertFirstFileIdentity(durable);
                 // Persist the only possibly dispatched file before attempting its write.
                 durable.activeUploadPath = file.path;
+                durable.sourceMtimeByPath = { ...durable.sourceMtimeByPath, [file.path]: file.mtime };
                 await (this.store as SmartMDStore).save();
                 const before = this.previewVaultId;
                 this.previewVaultId = durable.cloudVaultId;
@@ -5425,7 +4827,8 @@ export class OneDriveSyncService {
                                 throw new Error("取得凭据期间本机源字节变化");
                         } finally { fs.closeSync(fd); }
                     };
-                    result = await this.upload(file.path, bytes, false, null, undefined, undefined, guard);
+                    result = await this.upload(file.path, bytes, false, null, undefined, undefined, guard, file.mtime);
+                    result = await this.setUploadedModificationTime(result, file.mtime, undefined, guard);
                 } finally {
                     this.previewVaultId = before;
                 }
@@ -5497,6 +4900,11 @@ export class OneDriveSyncService {
                         await this.firstFileHash(await this.remoteBytes(item, scope)) !== file.sha256) {
                         throw new Error("远端已有文件无法核实，保留两端并禁止重新上传");
                     }
+                    const expectedMtime = Object.prototype.hasOwnProperty.call(prior.sourceMtimeByPath || {}, item.path)
+                        ? prior.sourceMtimeByPath?.[item.path] : undefined;
+                    if (expectedMtime !== undefined && item.mtime !== expectedMtime) {
+                        throw new Error(localize("OneDrive 尚未确认文件原修改时间：{0}", redactOneDriveText(item.path)));
+                    }
                     if (!finishOnly && current.get(item.path)?.sha256 !== file.sha256) {
                         throw new Error(localize("已上传文件的本地版本已改动、移走或被排除：{0}。首次同步已暂停，两端文件均已保留。", redactOneDriveText(item.path)));
                     }
@@ -5523,9 +4931,9 @@ export class OneDriveSyncService {
             .filter(path => !Object.prototype.hasOwnProperty.call(reviewed.observed, path));
         const preview: SyncPreview = {
             localCount: reviewed.files.length, remoteCount: Object.keys(reviewed.observed).length,
-            uploadCount: missing.length, downloadCount: 0, possibleConflicts: 0, skippedCount: 0,
+            uploadCount: missing.length, downloadCount: 0, skippedCount: 0,
             uploadPaths: missing, downloadPaths: [], samePaths: finishOnly ? [] : Object.keys(reviewed.observed).sort(),
-            skippedPaths: [], conflictPaths: [], unknownPaths: [], unexpectedNewTarget: false,
+            skippedPaths: [], unknownPaths: [], unexpectedNewTarget: false,
             identity: { accountId: prior.accountId, localVaultId: prior.localVaultId, cloudVaultId: prior.cloudVaultId },
             resumedFirstUpload: true,
             finishFirstUploadOnly: finishOnly,
@@ -5650,9 +5058,9 @@ export class OneDriveSyncService {
         const identity = existing.identity;
         const preview: SyncPreview = {
             localCount: current.length, remoteCount: 0, uploadCount: current.length,
-            downloadCount: 0, possibleConflicts: 0, skippedCount: 0,
+            downloadCount: 0, skippedCount: 0,
             uploadPaths: current.map(file => file.path), downloadPaths: [], samePaths: [],
-            skippedPaths: [], conflictPaths: [], unknownPaths: [], unexpectedNewTarget: false, identity,
+            skippedPaths: [], unknownPaths: [], unexpectedNewTarget: false, identity,
         };
         try {
             assertGrantCurrent();
@@ -5871,7 +5279,7 @@ export class OneDriveSyncService {
                 ])),
                 localVersions: localVersions.sort(),
                 remoteVersions: remote.map((item) =>
-                    JSON.stringify([item.path, item.id, item.etag, item.size])
+                    JSON.stringify([item.path, item.id, item.etag, item.size, item.mtime])
                 ).sort(),
             },
             local, remote,
@@ -6007,6 +5415,15 @@ export class OneDriveSyncService {
         this.vaultRegistryCache = merged;
     }
 
+    private async oneDriveVersionWins(path: string, localMtime: number, remote: RemoteFile): Promise<boolean> {
+        const verified = await this.readRemoteFileMetadata(path);
+        if (!verified || verified.id !== remote.id || verified.etag !== remote.etag ||
+            !verified.mtime || !Number.isFinite(localMtime) || localMtime <= 0) {
+            throw new Error(localize("无法核对文件的修改时间，请重新同步。"));
+        }
+        return verified.mtime >= localMtime;
+    }
+
     private async readRemoteFileMetadata(path: string, appRelative = false): Promise<RemoteFile | null> {
         const normalizedPath = normalizePath(path);
         const remotePath = appRelative
@@ -6014,7 +5431,7 @@ export class OneDriveSyncService {
             : normalizePath(`${this.basePath()}/${normalizedPath}`);
         const item = await this.graph(
             "GET",
-            `/drive/special/approot:/${encodePath(remotePath)}?$select=id,name,size,eTag,file,folder`,
+            `/drive/special/approot:/${encodePath(remotePath)}?$select=id,name,size,eTag,file,folder,fileSystemInfo,lastModifiedDateTime`,
         ).catch((error: any) => {
             if (error?.status === 404) return null;
             throw error;
@@ -6029,7 +5446,16 @@ export class OneDriveSyncService {
             name: String(item.name || normalizedPath.split("/").pop() || normalizedPath),
             size: Number(item.size || 0),
             etag: String(item.eTag || item.etag || ""),
+            mtime: this.remoteModificationTime(item),
         };
+    }
+
+    private remoteModificationTime(item: { fileSystemInfo?: { lastModifiedDateTime?: string }; lastModifiedDateTime?: string }): number | undefined {
+        for (const value of [item.fileSystemInfo?.lastModifiedDateTime, item.lastModifiedDateTime]) {
+            const time = value ? Date.parse(value) : NaN;
+            if (Number.isFinite(time) && time > 0) return time;
+        }
+        return undefined;
     }
 
     private basePath(): string {
@@ -6184,7 +5610,8 @@ export class OneDriveSyncService {
 
     private remoteDeltaCacheKey(): string {
         const local = (this.store as any).settings.local;
-        return "smartmd:onedrive-delta:v2:" +
+        // The previous cursor did not request modification metadata.
+        return "smartmd:onedrive-delta:v3:" +
             encodeURIComponent(String(local.microsoftAccountId || "")) + ":" +
             encodeURIComponent(String(this.settings().deviceId || "")) + ":" +
             encodeURIComponent(String(this.settings().vaultId || "")) +
@@ -6266,7 +5693,7 @@ export class OneDriveSyncService {
             cache.deltaLink = "";
             cache.nodes = {};
         }
-        let next: string | null = cache.deltaLink || `/drive/items/${cache.rootId}/delta?$select=id,name,size,eTag,cTag,parentReference,file,folder,deleted,fileSystemInfo`;
+        let next: string | null = cache.deltaLink || `/drive/items/${cache.rootId}/delta?$select=id,name,size,eTag,cTag,parentReference,file,folder,deleted,fileSystemInfo,lastModifiedDateTime`;
         const visitedPages = new Set<string>();
         try {
             while (next) {
@@ -6295,6 +5722,7 @@ export class OneDriveSyncService {
                         etag: String(item.eTag || item.cTag || previous.etag || ""),
                         quickXorHash: String(item.file?.hashes?.quickXorHash || previous.quickXorHash || ""),
                         sha1Hash: String(item.file?.hashes?.sha1Hash || previous.sha1Hash || ""),
+                        mtime: this.remoteModificationTime(item),
                     };
                 }
                 const nextLink: unknown = page["@odata.nextLink"];
@@ -6359,6 +5787,7 @@ export class OneDriveSyncService {
                 etag: node.etag || "",
                 quickXorHash: node.quickXorHash || undefined,
                 sha1Hash: node.sha1Hash || undefined,
+                mtime: node.mtime,
             }))
             .filter((item: RemoteFile) => Boolean(item.path));
     }
@@ -6371,6 +5800,7 @@ export class OneDriveSyncService {
         operation?: RunTicket,
         journalMotherPath?: string,
         beforeGraphDispatch?: () => void,
+        sourceMtime?: number,
     ): Promise<any> {
         // Capture the Microsoft session before any directory/session/journal
         // awaits; a new account cannot inherit this upload URL.
@@ -6453,6 +5883,7 @@ export class OneDriveSyncService {
         const session = await this.graph("POST", sessionEndpoint, {
             item: {
                 "@microsoft.graph.conflictBehavior": "fail",
+                ...(sourceMtime ? { fileSystemInfo: { lastModifiedDateTime: new Date(sourceMtime).toISOString() } } : {}),
             },
         }, versionHeaders, () => {
             if (operation) this.assertCurrent(operation);
@@ -6533,6 +5964,33 @@ export class OneDriveSyncService {
         return finalItem;
     }
 
+    private async setUploadedModificationTime(
+        uploaded: any, mtime: number, operation?: RunTicket, beforeGraphDispatch?: () => void,
+    ): Promise<any> {
+        const version = uploaded?.eTag || uploaded?.etag;
+        if (!uploaded?.id || !version || !Number.isFinite(mtime) || mtime <= 0) {
+            throw new Error(localize("无法核对文件的修改时间，请重新同步。"));
+        }
+        if (this.remoteModificationTime(uploaded) === mtime &&
+            uploaded.fileSystemInfo?.lastModifiedDateTime) return uploaded;
+        try {
+            const updated = await this.graph("PATCH", "/drive/items/" + encodeURIComponent(uploaded.id),
+                { fileSystemInfo: { lastModifiedDateTime: new Date(mtime).toISOString() } },
+                { "If-Match": version }, () => {
+                    if (operation) this.assertCurrent(operation);
+                    beforeGraphDispatch?.();
+                });
+            if (updated?.id !== uploaded.id || !(updated.eTag || updated.etag) ||
+                !updated.fileSystemInfo?.lastModifiedDateTime || this.remoteModificationTime(updated) !== mtime) {
+                throw new Error("OneDrive 未确认文件原修改时间");
+            }
+            return { ...uploaded, ...updated };
+        } catch (error: any) {
+            error.isUnknownCommit = true;
+            throw error;
+        }
+    }
+
     private async uploadStaged(
         operation: RunTicket,
         path: string,
@@ -6563,6 +6021,8 @@ export class OneDriveSyncService {
                 motherPath: path, direction: "upload",
                 sourceSha256: await this.sha256Bytes(data),
                 sourceBytes: data.byteLength,
+                sourceMtime: expectedLocal?.mtime,
+                sourceBaseline: JSON.stringify(this.settings().fileStates?.[path] || null),
                 expectedRemoteId: expectedRemote?.id || "",
                 expectedRemoteEtag: expectedRemote?.etag || "",
                 stagingPath, phase: "STAGE_SESSION_ISSUED",
@@ -6590,10 +6050,15 @@ export class OneDriveSyncService {
         this.authority.beginFinal(operation);
         try {
             if (!appRelative) await this.setUploadPhase(path, "FINAL_PUT_ISSUED");
-            const finalUploaded = await this.upload(
+            let finalUploaded = await this.upload(
                 path, data, appRelative, expectedRemote, operation,
-                appRelative ? undefined : path, beforeGraphDispatch,
+                appRelative ? undefined : path, beforeGraphDispatch, expectedLocal?.mtime,
             );
+            if (expectedLocal) {
+                finalUploaded = await this.setUploadedModificationTime(
+                    finalUploaded, expectedLocal.mtime, operation, beforeGraphDispatch,
+                );
+            }
             if (!appRelative) {
                 // IMPORTANT: the normal upload path must durably save the
                 // verified mother baseline BEFORE dispatching stage DELETE.
@@ -6615,6 +6080,7 @@ export class OneDriveSyncService {
                     remoteMatches[0].id !== finalId ||
                     remoteMatches[0].etag !== finalEtag ||
                     remoteMatches[0].size !== data.byteLength ||
+                    (expectedLocal && remoteMatches[0].mtime !== expectedLocal.mtime) ||
                     !sameBytes(await this.remoteBytes(remoteMatches[0]), data)) {
                     throw new Error("普通上传母文件尚未完成真实版本和SHA读回，禁止删除最后的暂存副本");
                 }
@@ -6882,52 +6348,36 @@ export class OneDriveSyncService {
         }
         this.assertCurrent(operation);
         try {
-            await this.app.vault.createBinary(stagingPath, data);
+            const writeOptions = remote.mtime ? { mtime: remote.mtime } : undefined;
+            await this.app.vault.createBinary(stagingPath, data, writeOptions);
             if (!sameBytes(await this.readPhysicalBinary(stagingPath), data)) {
                 throw new Error("OneDrive 下载暂存内容读回失败，禁止覆盖目标");
             }
-            try {
-                await this.assertFresh(operation, path, expectedLocal, remote);
-                const bound = this.app.vault.getAbstractFileByPath(path);
-                if (expectedLocal &&
-                    (!(bound instanceof TFile) || !before ||
-                     !sameBytes(await this.app.vault.readBinary(bound), before))) {
-                    throw new Error("本地目标版本已变化");
-                }
-            } catch {
-                if (this.isCurrent(operation)) {
-                    await this.preserveDownloadedConflict(operation, path, data);
-                }
-                throw new Error("本地或远端版本已变化，原文保留并另存下载副本");
-            }
+            await this.assertFresh(operation, path, expectedLocal, remote);
             this.assertCurrent(operation);
             this.authority.beginFinal(operation);
             await this.ensureLocalFolder(path);
             const current = this.app.vault.getAbstractFileByPath(path);
             if (current instanceof TFile) {
-                const local: LocalFile = {
-                    path, file: current, size: current.stat.size, mtime: current.stat.mtime,
-                };
-                await this.createRecoveryFromLocal(operation, path, local);
-                if (!before || !sameBytes(await this.app.vault.readBinary(current), before)) {
-                    if (this.isCurrent(operation)) await this.preserveDownloadedConflict(operation, path, data);
-                    throw new Error("备份后本地内容变化，不覆盖当前笔记");
+                if (!expectedLocal || current !== expectedLocal.file || !before ||
+                    !sameBytes(await this.app.vault.readBinary(current), before)) {
+                    throw new Error(localize("本机文件在同步时变化，请重新同步。"));
                 }
+                this.assertCurrent(operation);
                 try {
                     if (Platform.isAndroidApp && current.extension.toLowerCase() === "md") {
                         await replaceAndroidMarkdownIfUnchanged(
-                            this.app.vault, current, path, before, data, () => this.assertCurrent(operation),
+                            this.app.vault, current, path, before, data, () => this.assertCurrent(operation), writeOptions,
                         );
                     } else if (Platform.isAndroidApp) {
                         await replaceAndroidBinaryIfUnchanged(
                             this.app.vault, current, path, stagingPath, before, data, () => this.assertCurrent(operation),
                         );
                     } else {
-                        await this.app.vault.modifyBinary(current, data);
+                        await this.app.vault.modifyBinary(current, data, writeOptions);
                     }
                 } catch {
-                    if (this.isCurrent(operation)) await this.preserveDownloadedConflict(operation, path, data);
-                    throw new Error("Obsidian 原位二进制更新失败，原冷备份保持锁定");
+                    throw new Error("Obsidian 文件更新失败，请重新同步核对");
                 }
             } else {
                 if (await this.app.vault.adapter.exists(path)) {
@@ -6936,12 +6386,12 @@ export class OneDriveSyncService {
                 if (Platform?.isAndroidApp) {
                     await placeAndroidStagedFile(this.app.vault, stagingPath, path, () => this.assertCurrent(operation));
                 } else {
-                    await this.app.vault.createBinary(path, data);
+                    await this.app.vault.createBinary(path, data, writeOptions);
                 }
             }
             const actual = await this.readPhysicalBinary(path);
             if (!sameBytes(actual, data)) {
-                throw new Error("知识库落地读回校验失败，已保留冷备待核查");
+                throw new Error("知识库落地读回校验失败，请重新同步核对");
             }
             return localHash;
         } finally {
@@ -6962,72 +6412,6 @@ export class OneDriveSyncService {
                 );
             }
         }
-    }
-
-    private async preserveDownloadedConflict(operation: RunTicket, path: string, data: ArrayBuffer): Promise<void> {
-        this.assertCurrent(operation);
-        this.authority.beginFinal(operation);
-        const copyPath = conflictPath(path, "OneDrive");
-        if (Platform.isAndroidApp) {
-            await this.createAndroidLocalCopy(copyPath, data, () => this.assertCurrent(operation));
-            return;
-        }
-        await this.ensureLocalFolder(copyPath);
-        let created: TFile | null = null;
-        if (!this.app.vault.getAbstractFileByPath(copyPath)) created = await this.app.vault.createBinary(copyPath, data);
-        if (!this.isCurrent(operation)) {
-            if (created) await this.app.fileManager.trashFile(created);
-            throw new Error("同步已停止，下载内容仅保留在隔离暂存区");
-        }
-    }
-
-    private async preserveConflict(operation: RunTicket, local: LocalFile, remote: RemoteFile): Promise<void> {
-        const localData = await this.app.vault.readBinary(local.file);
-        await this.assertFresh(operation, local.path, local, remote);
-        const copyPath = conflictPath(local.path, this.settings().deviceName || "device");
-        await this.ensureLocalFolder(copyPath);
-        // Folder creation can yield to revocation; do not create a new copy
-        // using a ticket that expired while waiting.
-        this.assertCurrent(operation);
-        if (Platform.isAndroidApp) {
-            await this.createAndroidLocalCopy(copyPath, localData, () => this.assertCurrent(operation));
-        } else {
-            await this.app.vault.createBinary(copyPath, localData);
-        }
-        if (!sameBytes(await this.readPhysicalBinary(copyPath), localData)) {
-            throw new Error("本地冲突副本物理读回失败，禁止覆盖原稿");
-        }
-        const cloudCopy = await this.uploadStaged(operation, copyPath, localData, false, null);
-        const cloudCopyEtag = String(cloudCopy?.eTag || cloudCopy?.etag || "");
-        if (!cloudCopy?.id || !cloudCopyEtag ||
-            !sameBytes(await this.remoteBytes({
-                id: String(cloudCopy.id), path: copyPath,
-                name: copyPath.split("/").pop() || copyPath,
-                size: localData.byteLength, etag: cloudCopyEtag,
-            }), localData)) {
-            throw new Error("云端冲突副本回读未核实，原稿保持不覆盖");
-        }
-        this.assertCurrent(operation);
-        const settings = this.settings();
-        if (settings.pendingConflicts?.[local.path]) {
-            throw new Error("原路径存在未解决冲突，拒绝重复生成副本");
-        }
-        // A durable stop marker is not a merge/delete permission. Persist it
-        // before replacing the displayed note with the verified remote copy.
-        const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
-        settings.pendingConflicts = {
-            ...(settings.pendingConflicts || {}),
-            [local.path]: {
-                accountId, vaultId: settings.vaultId, deviceId: settings.deviceId,
-                remoteId: remote.id, remoteEtag: remote.etag,
-                localCopyPath: copyPath, remoteCopyId: String(cloudCopy.id),
-                remoteCopyEtag: cloudCopyEtag,
-                localHash: await this.sha256Bytes(localData), createdAt: Date.now(),
-            },
-        };
-        await (this.store as any).save();
-        await this.download(operation, remote, local.path, local, false, await this.sha256Bytes(localData));
-        new Notice(localize("检测到双端修改，已保留两份：{0}", local.path), 8000);
     }
 
     private async readPhysicalBinary(path: string): Promise<ArrayBuffer> {
@@ -7084,13 +6468,6 @@ export class OneDriveSyncService {
     ): Promise<void> {
         const data = await this.remoteBytes(remote);
         await this.writeVerifiedRecovery(operation, path, data, "external");
-    }
-
-    private async createRecoveryFromLocal(
-        operation: RunTicket, path: string, local: LocalFile,
-    ): Promise<void> {
-        const data = await this.app.vault.readBinary(local.file);
-        await this.writeVerifiedRecovery(operation, path, data, "vault");
     }
 
     listOneDriveRecoveries(): Array<any> {
