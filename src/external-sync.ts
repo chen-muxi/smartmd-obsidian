@@ -2582,7 +2582,7 @@ export class ExternalSyncService {
         return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     }
 
-    private async replaceExternalWithBackup(staged: string, target: string, backup: string, original: string): Promise<void> {
+    private async replaceExternalWithBackup(staged: string, target: string, backup: string, expectedHash: string): Promise<void> {
         const systemRoot = process.env.SystemRoot;
         if (!Platform.isWin || !systemRoot || !this.path.isAbsolute(systemRoot)) throw new Error("Windows 文件安全替换不可用");
         const executable = this.path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -2598,7 +2598,6 @@ export class ExternalSyncService {
             "  if ($hash -eq $env:SMARTMD_EXPECTED_HASH) { [IO.File]::Delete($env:SMARTMD_BACKUP) }",
             "} finally { $sha.Dispose(); $stream.Dispose() }",
         ].join("\n");
-        const expectedHash = await digest(original);
         const encoded = Buffer.from(script, "utf16le").toString("base64");
         const execFile = (require("child_process") as typeof import("child_process")).execFile;
         await new Promise<void>((resolve, reject) => {
@@ -2646,9 +2645,11 @@ export class ExternalSyncService {
                 throw new Error("目标文件在准备写入期间变化，拒绝覆盖");
             }
             let backup: any;
+            let expectedHash = "";
             if (original !== null) {
                 if (!backupContext) throw new Error("目标已有文件，缺少可核验的恢复位置");
                 backup = await this.createRecovery(backupContext.binding, backupContext.relativePath, original, "external", true);
+                expectedHash = await digest(original);
             }
             if (!permit() || !(await validate()) || await readOriginal() !== original) {
                 throw new Error("正式提交前原文件又发生变化，保留原件并撤销写入");
@@ -2659,7 +2660,7 @@ export class ExternalSyncService {
                 // visible as either the old complete bytes or the new complete bytes.
                 const rollback = temporary + ".original";
                 try {
-                    await this.replaceExternalWithBackup(temporary, destination, rollback, original);
+                    await this.replaceExternalWithBackup(temporary, destination, rollback, expectedHash);
                     if (await this.fs.promises.lstat(rollback).catch((error: NodeJS.ErrnoException) => {
                         if (error.code === "ENOENT") return null;
                         throw error;
