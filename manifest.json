@@ -1,7 +1,7 @@
 {
   "id": "smartmd",
   "name": "SmartMD",
-    "version": "1.0.26",
+    "version": "1.0.27",
   "minAppVersion": "1.15.1",
   "description": "Publish Markdown, sync safely across devices and desktop folders, and review AI edits before applying them.",
   "author": "Antigravity",

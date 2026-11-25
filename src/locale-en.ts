@@ -1631,4 +1631,13 @@ export const englishMessages: Readonly<Record<string, string>> = {
     "恢复到原位置": "Restore to original location",
     "同步正在运行，请稍后恢复": "Wait for the current sync to finish before restoring.",
     "恢复目标已被当前同步规则排除": "The current sync rules exclude this restore target.",
+    "已上传文件的本地版本已改动、移走或被排除：{0}。首次同步已暂停，两端文件均已保留。": "The local version of an already uploaded file was changed, moved, or excluded: {0}. The first sync is paused and both sides are preserved.",
+    "首次上传预览已过期，或本机、云端版本或同步范围已变化": "The first upload preview expired or the files or sync scope changed. Review the current preview again.",
+    "已核验云端已上传文件。请检查待上传清单；确认后只上传尚未提交的文件。": "Previously uploaded files were verified. Review the pending files. Approval uploads only files that have not yet been committed.",
+    "上次上传结果尚未核实，本地版本已改变：{0}。两端文件均已保留。": "The previous upload could not be verified and the local version changed: {0}. Both sides are preserved.",
+    "已核验首次上传的全部文件。确认只完成绑定，本次不传输文件。之后的本地改动会留给下一次同步。": "All first-upload files were verified. Confirm to finish linking this vault without transferring files. Later local changes will be picked up on the next sync.",
+    "确认并完成绑定": "Confirm and finish linking",
+    "SmartMD: 正在复核已上传文件。": "SmartMD: Verifying uploaded files.",
+    "SmartMD: 已完成绑定，可以开始下一次同步。": "SmartMD: Vault linked. You can run the next sync.",
+    "首次上传记录与同步基线不一致，已保留两端文件。": "The first-upload record does not match the sync baseline. Both copies were kept.",
 };

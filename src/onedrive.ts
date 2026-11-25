@@ -11,6 +11,7 @@ import {
 import { MicrosoftAuth, SmartMDStore } from "./core";
 import {
     SMARTKEEP_PUBLISH_URL,
+    newId,
     sharedStateForSync,
     SharedSmartMDState,
     SyncFailureDiagnostic,
@@ -76,6 +77,8 @@ type SyncPreview = {
     identity?: { accountId: string; localVaultId: string; cloudVaultId: string };
     items?: Record<string, SyncPreviewItem>;
     priorHistoryCount?: number;
+    resumedFirstUpload?: boolean;
+    finishFirstUploadOnly?: boolean;
 };
 
 function encodePath(path: string): string {
@@ -181,6 +184,7 @@ type FirstFileJournal = {
     registryDigest: string;
     ruleDigest: string;
     files: FirstFileEntry[];
+    activeUploadPath?: string | null;
     completed: Record<string, { id: string; etag: string }>;
     stage: "TRANSFERRING" | "RECONCILE_REQUIRED" | "FILES_COPIED";
     updatedAt: number;
@@ -212,7 +216,11 @@ export class SyncPreviewModal extends Modal {
 
     onOpen(): void {
         this.titleEl.setText(localize("首次同步预览"));
-        const tipText = this.commitEnabled
+        const tipText = this.preview.finishFirstUploadOnly
+            ? localize("已核验首次上传的全部文件。确认只完成绑定，本次不传输文件。之后的本地改动会留给下一次同步。")
+            : this.preview.resumedFirstUpload
+            ? localize("已核验云端已上传文件。请检查待上传清单；确认后只上传尚未提交的文件。")
+            : this.commitEnabled
             ? localize("请核对文件范围。点击【确认并开始同步】将正式执行首次双向无损同步；取消或关闭窗口不会对本地或云端做任何修改。")
             : localize("当前属于只读检查阶段，仅供核对文件范围。正式首次同步尚未开放，无法创建、上传、下载或删除任何文件。");
         this.contentEl.createEl("p", { text: localizeMessage(tipText) });
@@ -228,15 +236,17 @@ export class SyncPreviewModal extends Modal {
             localize("本次明确选择保留本地并创建全新独立云副本；旧 ") + this.preview.priorHistoryCount +
             localize(" 项文件基线及完成历史会保留在本机归档。新副本完整核验前旧基线不清空；旧云库不修改，旧许可不能继承。") });
         const list = this.contentEl.createEl("ul");
-        list.createEl("li", { text: localize("本地文件：{0}", this.preview.localCount) });
+        if (!this.preview.finishFirstUploadOnly) list.createEl("li", { text: localize("本地文件：{0}", this.preview.localCount) });
         list.createEl("li", { text: localize("云端文件：{0}", this.preview.remoteCount) });
         list.createEl("li", { text: localize("预计上传：{0}", this.preview.uploadCount) });
         list.createEl("li", { text: localize("预计下载：{0}", this.preview.downloadCount) });
-        list.createEl("li", { text: localize("同路径内容相同：{0}", this.preview.samePaths.length) });
-        list.createEl("li", { text: localize("同路径内容冲突：{0}", this.preview.conflictPaths.length) });
-        list.createEl("li", { text: localize("因大小限制或排除规则跳过：{0}", this.preview.skippedCount) });
-        list.createEl("li", { text: localize("内容无法核实：{0}", this.preview.unknownPaths.length) });
-        const groups: Array<[string, string[], string]> = [
+        if (!this.preview.finishFirstUploadOnly) {
+            list.createEl("li", { text: localize("同路径内容相同：{0}", this.preview.samePaths.length) });
+            list.createEl("li", { text: localize("同路径内容冲突：{0}", this.preview.conflictPaths.length) });
+            list.createEl("li", { text: localize("因大小限制或排除规则跳过：{0}", this.preview.skippedCount) });
+            list.createEl("li", { text: localize("内容无法核实：{0}", this.preview.unknownPaths.length) });
+        }
+        const groups: Array<[string, string[], string]> = this.preview.finishFirstUploadOnly ? [] : [
             [localize("将上传"), this.preview.uploadPaths, localize("本机 → 云端")],
             [localize("将下载"), this.preview.downloadPaths, localize("云端 → 本机")],
             [localize("内容相同"), this.preview.samePaths, localize("不传输（字节相同）")],
@@ -273,7 +283,8 @@ export class SyncPreviewModal extends Modal {
         }
         const actions = this.contentEl.createDiv({ cls: "smartmd-actions" });
         actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
-        const start = actions.createEl("button", { text: this.commitEnabled ? localize("确认并开始同步") : localize("尚未开放首次同步"), cls: "mod-cta" });
+        const start = actions.createEl("button", { text: this.preview.finishFirstUploadOnly ? localize("确认并完成绑定")
+            : this.commitEnabled ? localize("确认并开始同步") : localize("尚未开放首次同步"), cls: "mod-cta" });
         const unresolved = this.preview.conflictPaths.length > 0 ||
             this.preview.unknownPaths.length > 0 || this.preview.unexpectedNewTarget;
         if (unresolved) this.contentEl.createEl("p", {
@@ -286,7 +297,8 @@ export class SyncPreviewModal extends Modal {
             if (this.submitted || !this.commitEnabled || unresolved) return;
             this.submitted = true;
             this.close();
-            new Notice(localize("SmartMD: 正在复核首次同步计划，复核通过后才会开始传输。"), 5000);
+            new Notice(this.preview.finishFirstUploadOnly ? localize("SmartMD: 正在复核已上传文件。")
+                : localize("SmartMD: 正在复核首次同步计划，复核通过后才会开始传输。"), 5000);
             try {
                 const success = await this.proceed((message) => {
                     const plugin = (this.app as any).plugins?.plugins?.smartmd;
@@ -295,7 +307,8 @@ export class SyncPreviewModal extends Modal {
                     }
                 });
                 if (success) {
-                    new Notice(localize("SmartMD: 首次同步完成！所有笔记已就绪。"), 6000);
+                    new Notice(this.preview.finishFirstUploadOnly ? localize("SmartMD: 已完成绑定，可以开始下一次同步。")
+                        : localize("SmartMD: 首次同步完成！所有笔记已就绪。"), 6000);
                 }
             } catch (error: any) {
                 new Notice(localize("SmartMD: 同步异常：") + localizeMessage(safeOneDriveError(error)), 8000);
@@ -5257,7 +5270,7 @@ export class OneDriveSyncService {
             ticketId: "", digest: "", registrationOpId: registration.ticketId,
             accountId: registration.identity.accountId, localVaultId: registration.identity.localVaultId,
             cloudVaultId: registration.identity.cloudVaultId, deviceId: registration.identity.deviceId,
-            registryDigest: "", ruleDigest: "", files: [], completed: {},
+            registryDigest: "", ruleDigest: "", files: [], activeUploadPath: null, completed: {},
             stage: "TRANSFERRING", updatedAt: Date.now(),
         };
         this.assertFirstFileIdentity(journal);
@@ -5326,11 +5339,13 @@ export class OneDriveSyncService {
 
     private async performApprovedFirstFileTransfer(
         journal: FirstFileJournal, ticket: FirstCommitTicket, generation: number,
+        assertPreviousCurrent?: () => void,
     ): Promise<FileCopyDecision> {
         const blocked = (reason: string): FileCopyDecision => ({ status: "BLOCKED", reason });
         try {
             if (Date.now() >= ticket.expiresAt) return blocked("最终批准已过期，必须重新预览。");
             await this.verifyFirstFileContent(journal, false);
+            assertPreviousCurrent?.();
             if (generation !== this.resumedApprovalGeneration) return blocked("首次文件上传许可已撤销");
         } catch {
             return blocked("提交前本地/云端版本或账号发生变化，未执行写入。");
@@ -5348,7 +5363,10 @@ export class OneDriveSyncService {
             return blocked("本地文件事务日志无法持久保存，云端保持不变。");
         }
         try {
-            for (const file of durable.files) {
+            const activePath = durable.activeUploadPath;
+            const active = activePath ? durable.files.find(file => file.path === activePath) : undefined;
+            const files = active ? [active, ...durable.files.filter(file => file !== active)] : durable.files;
+            for (const file of files) {
                 if (Object.prototype.hasOwnProperty.call(durable.completed, file.path)) continue;
                 // Read and validate current state before each individual write.
                 // Recheck all approved identities, metadata and local hashes before every write.
@@ -5366,6 +5384,9 @@ export class OneDriveSyncService {
                 }
                 await this.assertFirstCommitGraphAccount(durable.accountId);
                 this.assertFirstFileIdentity(durable);
+                // Persist the only possibly dispatched file before attempting its write.
+                durable.activeUploadPath = file.path;
+                await (this.store as SmartMDStore).save();
                 const before = this.previewVaultId;
                 this.previewVaultId = durable.cloudVaultId;
                 let result: any;
@@ -5401,6 +5422,7 @@ export class OneDriveSyncService {
                 Object.defineProperty(durable.completed, file.path, {
                     value: { id: String(result.id), etag: String(result.eTag || result.etag) }, enumerable: true,
                 });
+                durable.activeUploadPath = null;
                 durable.updatedAt = Date.now();
                 await (this.store as any).save();
             }
@@ -5423,17 +5445,29 @@ export class OneDriveSyncService {
         if (!["TRANSFERRING", "RECONCILE_REQUIRED", "FILES_COPIED"].includes(prior.stage)) {
             throw new Error("首次上传事务阶段不可信，保持暂停");
         }
-        const inspect = async () => {
-            if (settings.firstFileJournal !== prior) throw new Error("原文件操作已变化");
-            const current = await this.currentFirstFileEntries();
-            const ruleDigest = await contentHash(JSON.stringify([this.maxBytes(), settings.ignorePatterns || []]));
-            if (JSON.stringify(current) !== JSON.stringify(prior.files) || ruleDigest !== prior.ruleDigest) {
-                throw new Error("首次上传后本机版本或同步范围已变化，原操作保持暂停");
+        const originalJournal = JSON.stringify(prior);
+        const finishOnly = prior.stage === "FILES_COPIED";
+        const assertPreviousCurrent = () => {
+            assertGrantCurrent();
+            if (settings.firstFileJournal !== prior || JSON.stringify(prior) !== originalJournal) {
+                throw new Error("原文件操作已变化");
             }
+        };
+        // Legacy transfers were sequential and persisted each completion before
+        // starting the next file. Only the first unconfirmed path could be in flight.
+        const activePath = prior.activeUploadPath === undefined
+            ? prior.files.find(file => !Object.prototype.hasOwnProperty.call(prior.completed, file.path))?.path
+            : prior.activeUploadPath;
+        const inspect = async () => {
+            assertPreviousCurrent();
+            const files = finishOnly ? [] : await this.currentFirstFileEntries();
+            const ruleDigest = finishOnly ? prior.ruleDigest
+                : await contentHash(JSON.stringify([this.maxBytes(), settings.ignorePatterns || []]));
             await this.verifyFirstFileRegistration(prior);
             const observed: FirstFileJournal["completed"] = {};
             const remote = await this.readFirstCopyRemoteFiles(prior);
             const approved = new Map(prior.files.map(file => [file.path, file]));
+            const current = new Map(files.map(file => [file.path, file]));
             for (const item of [...remote].sort((a, b) => a.path.localeCompare(b.path))) {
                 const file = approved.get(item.path);
                 const previous = Object.prototype.hasOwnProperty.call(prior.completed, item.path) ? prior.completed[item.path] : null;
@@ -5441,44 +5475,77 @@ export class OneDriveSyncService {
                     await this.firstFileHash(await this.remoteBytes(item)) !== file.sha256) {
                     throw new Error("远端已有文件无法核实，保留两端并禁止重新上传");
                 }
+                if (!finishOnly && current.get(item.path)?.sha256 !== file.sha256) {
+                    throw new Error(localize("已上传文件的本地版本已改动、移走或被排除：{0}。首次同步已暂停，两端文件均已保留。", redactOneDriveText(item.path)));
+                }
                 Object.defineProperty(observed, item.path, { value: { id: item.id, etag: item.etag }, enumerable: true });
             }
             if (Object.keys(prior.completed).some(path => !Object.prototype.hasOwnProperty.call(observed, path))) {
                 throw new Error("已上传的云端文件丢失，首次上传保持暂停");
             }
-            assertGrantCurrent();
-            return observed;
+            const unresolvedPath = !finishOnly && activePath && !Object.prototype.hasOwnProperty.call(observed, activePath) ? activePath : null;
+            if (unresolvedPath) {
+                const original = approved.get(unresolvedPath);
+                if (!original || current.get(unresolvedPath)?.sha256 !== original.sha256) {
+                    throw new Error(localize("上次上传结果尚未核实，本地版本已改变：{0}。两端文件均已保留。", redactOneDriveText(unresolvedPath)));
+                }
+            }
+            if (finishOnly) this.assertFinalizedFirstFileBaseline(prior);
+            assertPreviousCurrent();
+            return { files, ruleDigest, observed, unresolvedPath };
         };
-        const observed = await inspect();
-        const missing = prior.files.map(file => file.path)
-            .filter(path => !Object.prototype.hasOwnProperty.call(observed, path));
+        const reviewed = await inspect();
+        const missing = finishOnly ? [] : reviewed.files.map(file => file.path)
+            .filter(path => !Object.prototype.hasOwnProperty.call(reviewed.observed, path));
         const preview: SyncPreview = {
-            localCount: prior.files.length, remoteCount: Object.keys(observed).length,
+            localCount: reviewed.files.length, remoteCount: Object.keys(reviewed.observed).length,
             uploadCount: missing.length, downloadCount: 0, possibleConflicts: 0, skippedCount: 0,
-            uploadPaths: missing, downloadPaths: [], samePaths: Object.keys(observed).sort(),
+            uploadPaths: missing, downloadPaths: [], samePaths: finishOnly ? [] : Object.keys(reviewed.observed).sort(),
             skippedPaths: [], conflictPaths: [], unknownPaths: [], unexpectedNewTarget: false,
             identity: { accountId: prior.accountId, localVaultId: prior.localVaultId, cloudVaultId: prior.cloudVaultId },
+            resumedFirstUpload: true,
+            finishFirstUploadOnly: finishOnly,
         };
         const expiresAt = Date.now() + 5 * 60_000;
         await new Promise<void>(resolve => new SyncPreviewModal(this.app, preview, async (progress) => {
             const latest = await inspect();
-            if (Date.now() >= expiresAt || JSON.stringify(latest) !== JSON.stringify(observed)) {
-                throw new Error("首次上传预览已过期，或云端版本已变化");
+            if (Date.now() >= expiresAt || JSON.stringify(latest) !== JSON.stringify(reviewed)) {
+                throw new Error("首次上传预览已过期，或本机、云端版本或同步范围已变化");
             }
-            if (prior.stage !== "FILES_COPIED") {
-                const journal: FirstFileJournal = { ...prior, completed: latest, stage: "TRANSFERRING" };
+            const journal: FirstFileJournal = {
+                ...prior, files: latest.files, ruleDigest: latest.ruleDigest, completed: latest.observed,
+                activeUploadPath: latest.unresolvedPath,
+            };
+            if (!finishOnly) {
+                journal.stage = "TRANSFERRING";
+                journal.ticketId = newId("first-resume");
+                journal.digest = await contentHash(JSON.stringify({ ...journal, digest: "" }));
                 const ticket = { ticketId: journal.ticketId, digest: journal.digest, expiresAt };
                 progress("正在续传尚未提交的文件");
-                const result = await this.performApprovedFirstFileTransfer(journal, ticket, generation);
+                const result = await this.performApprovedFirstFileTransfer(journal, ticket, generation, assertPreviousCurrent);
                 if (result.status !== "FILES_COPIED") throw new Error(result.reason || "首次上传仍需对账");
-            } else {
-                await this.verifyFirstFileContent(prior, true);
-            }
+            } else assertPreviousCurrent();
             assertGrantCurrent();
             await this.completeFirstFileCopy(prior.cloudVaultId, registered.cloudVaultName, prior.accountId, assertGrantCurrent);
             return true;
         }, resolve, true).open());
         return settings.firstSyncCompleted === true;
+    }
+
+    private assertFinalizedFirstFileBaseline(journal: FirstFileJournal): void {
+        const settings = this.settings();
+        const states = settings.fileStates || {};
+        if (settings.localVaultId !== journal.localVaultId || settings.cloudVaultId !== journal.cloudVaultId ||
+            Object.keys(journal.completed).length !== journal.files.length || Object.keys(states).length !== journal.files.length ||
+            journal.files.some(file => {
+                const remote = journal.completed[file.path];
+                const baseline = states[file.path];
+                return !remote || !baseline || baseline.localHash !== file.sha256 ||
+                    baseline.localMtime !== file.mtime || baseline.localSize !== file.size ||
+                    baseline.remoteId !== remote.id || baseline.remoteEtag !== remote.etag;
+            })) {
+            throw new Error(localize("首次上传记录与同步基线不一致，已保留两端文件。"));
+        }
     }
 
     private async resumeRegisteredFirstCopy(assertGrantCurrent: () => void, generation: number): Promise<boolean> {
