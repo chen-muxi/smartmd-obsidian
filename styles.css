@@ -920,6 +920,36 @@
     min-width: 0;
 }
 
+.smartmd-android-vault-choices {
+    display: grid;
+    gap: var(--size-4-2);
+}
+
+.smartmd-android-vault-choices button.smartmd-android-vault-choice {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--size-4-1);
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 48px;
+    padding: var(--size-4-3);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
+    border: 1px solid var(--background-modifier-border);
+}
+
+.smartmd-android-vault-name {
+    font-weight: var(--font-semibold);
+}
+
+.smartmd-android-vault-detail {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
 .smartmd-build-info {
     font-size: 11px;
     color: var(--text-muted);

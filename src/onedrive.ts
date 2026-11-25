@@ -75,6 +75,7 @@ type SyncPreview = {
     unknownPaths: string[];
     unexpectedNewTarget: boolean;
     identity?: { accountId: string; localVaultId: string; cloudVaultId: string };
+    androidCloudVaultName?: string;
     items?: Record<string, SyncPreviewItem>;
     priorHistoryCount?: number;
     resumedFirstUpload?: boolean;
@@ -218,15 +219,21 @@ export class SyncPreviewModal extends Modal {
 
     onOpen(): void {
         this.titleEl.setText(localize("首次同步预览"));
+        const androidPreview = this.preview.androidCloudVaultName !== undefined;
         const tipText = this.preview.finishFirstUploadOnly
             ? localize("已核验首次上传的全部文件。确认只完成绑定，本次不传输文件。之后的本地改动会留给下一次同步。")
             : this.preview.resumedFirstUpload
             ? localize("已核验云端已上传文件。请检查待上传清单；确认后只上传尚未提交的文件。")
+            : androidPreview
+            ? localize("核对上传和下载清单，确认后开始同步。首次同步不会删除文件。")
             : this.commitEnabled
             ? localize("请核对文件范围。点击【确认并开始同步】将正式执行首次双向无损同步；取消或关闭窗口不会对本地或云端做任何修改。")
             : localize("当前属于只读检查阶段，仅供核对文件范围。正式首次同步尚未开放，无法创建、上传、下载或删除任何文件。");
         this.contentEl.createEl("p", { text: localizeMessage(tipText) });
-        if (this.preview.identity) {
+        if (androidPreview) {
+            this.contentEl.createEl("p", { text: localize("此手机：{0}", this.app.vault.getName()) });
+            this.contentEl.createEl("p", { text: localize("OneDrive：{0}", this.preview.androidCloudVaultName) });
+        } else if (this.preview.identity) {
             const identity = this.preview.identity;
             this.contentEl.createEl("p", { text:
                 localize("微软账号：") + redactOneDriveText(identity.accountId) });
@@ -234,9 +241,76 @@ export class SyncPreviewModal extends Modal {
                 localize("本地 Vault ID：") + redactOneDriveText(identity.localVaultId) +
                 localize("；云端知识库 ID：") + redactOneDriveText(identity.cloudVaultId) });
         }
-        if (this.preview.priorHistoryCount) this.contentEl.createEl("p", { text:
+        if (this.preview.priorHistoryCount && !androidPreview) this.contentEl.createEl("p", { text:
             localize("本次明确选择保留本地并创建全新独立云副本；旧 ") + this.preview.priorHistoryCount +
             localize(" 项文件基线及完成历史会保留在本机归档。新副本完整核验前旧基线不清空；旧云库不修改，旧许可不能继承。") });
+        if (androidPreview) {
+            this.renderAndroidFiles();
+        } else {
+            this.renderDetailedFiles();
+        }
+        const unresolved =
+            this.preview.unknownPaths.length > 0 || this.preview.unexpectedNewTarget;
+        if (unresolved) this.contentEl.createEl("p", {
+            text: androidPreview
+                ? localize("暂时无法同步。请返回后重试。")
+                : this.preview.unexpectedNewTarget
+                ? localize("拟新建的云端目标已有未登记内容，不能按全新空库提交；请重新检查云端身份。")
+                : localize("有文件的内容或版本无法核实。请重新检查后再同步。"),
+        });
+        const actions = this.contentEl.createDiv({ cls: "smartmd-actions" });
+        actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
+        const start = actions.createEl("button", { text: this.preview.finishFirstUploadOnly ? localize("确认并完成绑定")
+            : this.commitEnabled ? localize("确认并开始同步") : localize("尚未开放首次同步"), cls: "mod-cta" });
+        start.disabled = !this.commitEnabled || unresolved;
+        start.onclick = async () => {
+            if (this.submitted || !this.commitEnabled || unresolved) return;
+            this.submitted = true;
+            this.close();
+            new Notice(this.preview.finishFirstUploadOnly ? localize("SmartMD: 正在复核已上传文件。")
+                : androidPreview ? localize("正在检查文件，请稍等…")
+                : localize("SmartMD: 正在复核首次同步计划，复核通过后才会开始传输。"), 5000);
+            try {
+                const success = await this.proceed((message) => {
+                    const plugin = (this.app as any).plugins?.plugins?.smartmd;
+                    if (plugin?.updateStatusBar) {
+                        plugin.updateStatusBar(message);
+                    }
+                });
+                if (success) {
+                    new Notice(this.preview.finishFirstUploadOnly ? localize("SmartMD: 已完成绑定，可以开始下一次同步。")
+                        : androidPreview ? localize("首次同步完成")
+                        : localize("SmartMD: 首次同步完成！所有笔记已就绪。"), 6000);
+                }
+            } catch (error: any) {
+                new Notice(localize("SmartMD: 同步异常：") + localizeMessage(safeOneDriveError(error)), 8000);
+            } finally {
+                this.settle();
+            }
+        };
+    }
+
+    private renderAndroidFiles(): void {
+        const groups: Array<[string, string[]]> = [
+            ["上传到 OneDrive", this.preview.uploadPaths],
+            ["下载到这台手机", this.preview.downloadPaths],
+            ["这次跳过", this.preview.skippedPaths],
+            ["暂时无法检查", this.preview.unknownPaths],
+        ];
+        for (const [label, paths] of groups) {
+            if (!paths.length) continue;
+            const section = this.contentEl.createEl("details", { cls: "smartmd-onedrive-preview-file" });
+            section.open = paths.length <= 5;
+            section.createEl("summary", { text: localize("{0}：{1} 项", localize(label), paths.length) });
+            const files = section.createEl("ul");
+            for (const path of paths) files.createEl("li", { text: redactOneDriveText(path) });
+        }
+        if (groups.every(([, paths]) => paths.length === 0) && !this.preview.unexpectedNewTarget) {
+            this.contentEl.createEl("p", { text: localize("两边文件一致，可以直接连接。") });
+        }
+    }
+
+    private renderDetailedFiles(): void {
         const list = this.contentEl.createEl("ul");
         if (!this.preview.finishFirstUploadOnly) list.createEl("li", { text: localize("本地文件：{0}", this.preview.localCount) });
         list.createEl("li", { text: localize("云端文件：{0}", this.preview.remoteCount) });
@@ -281,41 +355,6 @@ export class SyncPreviewModal extends Modal {
                     : localize("云端目标：预览时不存在，未经最终批准不会创建") });
             }
         }
-        const actions = this.contentEl.createDiv({ cls: "smartmd-actions" });
-        actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
-        const start = actions.createEl("button", { text: this.preview.finishFirstUploadOnly ? localize("确认并完成绑定")
-            : this.commitEnabled ? localize("确认并开始同步") : localize("尚未开放首次同步"), cls: "mod-cta" });
-        const unresolved =
-            this.preview.unknownPaths.length > 0 || this.preview.unexpectedNewTarget;
-        if (unresolved) this.contentEl.createEl("p", {
-            text: this.preview.unexpectedNewTarget
-                ? localize("拟新建的云端目标已有未登记内容，不能按全新空库提交；请重新检查云端身份。")
-                : localize("有文件的内容或版本无法核实。请重新检查后再同步。"),
-        });
-        start.disabled = !this.commitEnabled || unresolved;
-        start.onclick = async () => {
-            if (this.submitted || !this.commitEnabled || unresolved) return;
-            this.submitted = true;
-            this.close();
-            new Notice(this.preview.finishFirstUploadOnly ? localize("SmartMD: 正在复核已上传文件。")
-                : localize("SmartMD: 正在复核首次同步计划，复核通过后才会开始传输。"), 5000);
-            try {
-                const success = await this.proceed((message) => {
-                    const plugin = (this.app as any).plugins?.plugins?.smartmd;
-                    if (plugin?.updateStatusBar) {
-                        plugin.updateStatusBar(message);
-                    }
-                });
-                if (success) {
-                    new Notice(this.preview.finishFirstUploadOnly ? localize("SmartMD: 已完成绑定，可以开始下一次同步。")
-                        : localize("SmartMD: 首次同步完成！所有笔记已就绪。"), 6000);
-                }
-            } catch (error: any) {
-                new Notice(localize("SmartMD: 同步异常：") + localizeMessage(safeOneDriveError(error)), 8000);
-            } finally {
-                this.settle();
-            }
-        };
     }
 
 
@@ -359,6 +398,10 @@ class VaultSelectionModal extends Modal {
     }
 
     onOpen(): void {
+        if (Platform.isAndroidApp) {
+            this.renderAndroidChoices();
+            return;
+        }
         this.titleEl.setText(localize("选择云端知识库"));
         this.contentEl.createEl("p", {
             text: localize("本地与云端知识库按各自 ID 区分，同名不等于同一份。默认暂不同步；登录和选择均不授权传输、创建或删除。"),
@@ -377,10 +420,6 @@ class VaultSelectionModal extends Modal {
             // Vault. Selection is still READ-ONLY, not execution consent.
             receive.disabled = !this.eligibleReceiver;
             if (this.eligibleReceiver) receive.onclick = () => this.finish(vault);
-            if (this.allowAndroidMerge) {
-                item.createEl("button", { text: localize("连接当前知识库并预览同步") }).onclick =
-                    () => this.finish({ ...vault, mergeAndroid: true });
-            }
             if (this.allowDesktopRegistration) {
                 item.createEl("button", { text: localize("高级：仅登记完全一致的内容") }).onclick =
                     () => this.finish({ ...vault, registerIdentical: true });
@@ -395,9 +434,41 @@ class VaultSelectionModal extends Modal {
         this.contentEl.createEl("button", {
             text: localize("两份都保留，不合并"),
         }).onclick = () => this.close();
-        if (this.allowAndroidMerge) this.contentEl.createEl("p", {
-            text: localize("首次连接会预览上传和下载，不会同步删除。两端都有的文件保留较新版本，同时间以 OneDrive 为准。"),
-        });
+    }
+
+    private renderAndroidChoices(): void {
+        const canConnect = this.eligibleReceiver || this.allowAndroidMerge;
+        this.titleEl.setText(localize("选择要同步的 OneDrive 知识库"));
+        if (this.vaults.length > 0) {
+            this.contentEl.createEl("p", { text: canConnect
+                ? localize("选中电脑正在同步的知识库。下一步会先显示「{0}」的同步预览。", this.app.vault.getName())
+                : localize("这个手机知识库暂时无法连接。请先检查它原来的同步设置。") });
+        } else {
+            this.contentEl.createEl("p", { text: localize("这个微软账号下还没有 SmartMD 云端知识库。") });
+        }
+        const list = this.contentEl.createDiv({ cls: "smartmd-android-vault-choices" });
+        const nameCounts = new Map<string, number>();
+        for (const { name } of this.vaults) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+        for (const vault of this.vaults) {
+            const button = list.createEl("button", { cls: "smartmd-android-vault-choice" });
+            button.disabled = !canConnect;
+            button.createSpan({ cls: "smartmd-android-vault-name", text: vault.name || localize("未命名知识库") });
+            if ((nameCounts.get(vault.name) ?? 0) > 1) {
+                button.createSpan({ cls: "smartmd-android-vault-detail", text: localize("云端 ID：") + vault.id });
+            }
+            if (canConnect) {
+                button.createSpan({ cls: "smartmd-android-vault-detail", text: this.eligibleReceiver
+                    ? localize("预览下载到当前知识库")
+                    : localize("预览双向同步") });
+                button.onclick = () => this.finish({ ...vault, mergeAndroid: this.allowAndroidMerge });
+            }
+        }
+        const actions = this.contentEl.createDiv({ cls: "modal-button-container" });
+        actions.createEl("button", { text: localize("取消") }).onclick = () => this.close();
+        actions.createEl("button", {
+            text: localize("在 OneDrive 新建知识库"),
+            cls: this.vaults.length === 0 ? "mod-cta" : undefined,
+        }).onclick = () => this.finish("new");
     }
 
     onClose(): void {
@@ -406,6 +477,7 @@ class VaultSelectionModal extends Modal {
     }
 
     private finish(choice: RemoteVault | "new"): void {
+        if (this.settled) return;
         this.settled = true;
         this.choose(choice);
         this.close();
@@ -452,7 +524,8 @@ export class OneDriveSyncService {
     private observedSharedState = "";
     private statusListener: (() => void) | null = null;
     private firstUploadInspection: { controller: AbortController; label: string } | null = null;
-    private firstUploadInspectionError = "";
+    private firstConnectionError = "";
+    private firstConnectionProgress = "";
     private readonly firstUploadReadTimeoutMs = 30_000;
     private deleteGuard: ((path: string, readOnly?: boolean) => Promise<boolean>) | null = null;
     private ensuredRemoteFolders = new Set<string>();
@@ -2471,8 +2544,9 @@ export class OneDriveSyncService {
         if (settings.status === "stopping") return "正在停止，等待当前提交完成并核对状态";
         if (this.running || settings.status === "syncing") return "同步中";
         if (this.firstUploadInspection) return this.firstUploadInspection.label;
-        if (this.preparing) return "正在连接 OneDrive 并检查同步范围";
-        if (this.firstUploadInspectionError) return this.firstUploadInspectionError;
+        if (this.preparing) return this.firstConnectionProgress || (Platform.isAndroidApp
+            ? "正在查找 OneDrive 知识库…" : "正在连接 OneDrive 并检查同步范围");
+        if (this.firstConnectionError) return this.firstConnectionError;
         if (settings.status === "partial_success") return localizeMessage(settings.lastError) || localize("部分同步完成（存在未同步文件）");
         if (settings.status === "failed") return localize("同步失败：{0}", localizeMessage(settings.lastError) || localize("未知原因"));
         if (settings.status === "paused") return settings.lastError ? localize("同步未完成：{0}", localizeMessage(settings.lastError)) : "已暂停";
@@ -2498,6 +2572,7 @@ export class OneDriveSyncService {
         if (status === "stopping") return "正在停止…";
         if (status === "syncing" || this.running) return "同步中…";
         if (this.preparing) return "检查中…";
+        if (Platform.isAndroidApp && !this.settings().firstSyncCompleted) return "开始同步";
         return "立即同步";
     }
 
@@ -2545,7 +2620,7 @@ export class OneDriveSyncService {
             return this.canRun() ? await this.sync(false) : false;
         }
         this.preparing = true;
-        this.firstUploadInspectionError = "";
+        this.firstConnectionError = "";
         this.notifyStatusChange();
         const initialAccount = String((this.store as any).settings.local.microsoftAccountId || "");
         const initialGeneration = this.resumedApprovalGeneration;
@@ -2557,13 +2632,8 @@ export class OneDriveSyncService {
         };
         try {
             if (!initialAccount) throw new Error("请先完成微软账号登录。");
-            // Microsoft documents that the first approot GET can create the
-            // application folder. Obtain an explicit access decision BEFORE
-            // any registry/approot discovery, separately from file-sync consent.
-            const accessApproved = await this.approveFirstAppFolderStep(
-                "访问 OneDrive 专用应用目录",
-                "微软首次访问 AppFolder 时可能自动建立 Apps/SmartMD 文件夹。本次只批准访问和核对目录，不批准上传笔记、合并知识库或删除文件。是否继续？");
-            if (!accessApproved) return false;
+            // The user started this check. Opening the app folder may cause
+            // OneDrive to create it. The file plan still needs approval below.
             this.vaultRegistryCache = null;
             this.registryReadIsTrusted = false;
             if (settings.firstFileJournal && !settings.firstCommitJournal?.priorBindingArchive) {
@@ -2744,6 +2814,8 @@ export class OneDriveSyncService {
                 unexpectedNewTarget: choice.mode === "new" && allRemote.length > 0,
                 identity: { accountId: initialAccount,
                     localVaultId: prepared.snapshot.localVaultId, cloudVaultId: choice.id },
+                androidCloudVaultName: Platform.isAndroidApp
+                    ? choice.name || localize("未命名知识库") : undefined,
                 items,
                 priorHistoryCount: choice.mode === "new" ? Object.keys(settings.fileStates || {}).length : 0,
             };
@@ -2869,12 +2941,14 @@ export class OneDriveSyncService {
             });
             return Boolean(settings.firstSyncCompleted);
         } catch (error: any) {
-            new Notice(localize("OneDrive 首次连接已停止：") + localizeMessage(safeOneDriveError(error)), 8000);
+            this.firstConnectionError = localize("OneDrive 首次连接已停止：") + localizeMessage(safeOneDriveError(error));
+            new Notice(this.firstConnectionError, 8000);
             return false;
         } finally {
             this.activeFirstReceiverResume = false;
             this.pendingFirstChoice = null;
             this.previewVaultId = null;
+            this.firstConnectionProgress = "";
             this.preparing = false;
             this.notifyStatusChange();
         }
@@ -4362,6 +4436,11 @@ export class OneDriveSyncService {
             if (!match) throw new Error("云端知识库选择已过期，需重新检查。");
             this.pendingFirstChoice = { id: match.id, name: match.name, mode: "existing", mergeAndroid: choice.mergeAndroid };
             this.identicalRegistrationRequested = choice.registerIdentical === true;
+            if (Platform.isAndroidApp) {
+                this.firstConnectionProgress = localize("正在准备「{0}」的同步预览…", match.name || localize("未命名知识库"));
+                new Notice(this.firstConnectionProgress);
+                this.notifyStatusChange();
+            }
         }
         return true;
     }
@@ -5203,7 +5282,7 @@ export class OneDriveSyncService {
             scope.assertCurrent();
             return result;
         } catch (error) {
-            if (controller.signal.aborted) this.firstUploadInspectionError = safeOneDriveError(error);
+            if (controller.signal.aborted) this.firstConnectionError = safeOneDriveError(error);
             throw error;
         } finally {
             window.clearTimeout(timer);

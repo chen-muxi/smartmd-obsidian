@@ -1005,7 +1005,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             ? localize("{0}；下次检查：{1}", localizeMessage(this.runtime.oneDrive.statusText()), new Date(Math.max(Date.now(), nextCheckAt)).toLocaleString())
             : localizeMessage(this.runtime.oneDrive.statusText());
         new Setting(container).setClass("smartmd-settings-section-title").setName(localize("OneDrive 多设备同步")).setHeading();
-        container.createEl("p", { text: localize("使用插件独立空间同步知识库文件与非敏感插件状态。授权、模型密钥、外部路径和设备历史不会跨设备同步。{0}", localizeMessage(this.runtime.store.storageBoundaryText())) });
+        container.createEl("p", { text: Platform.isAndroidApp
+            ? localize("用 OneDrive 在手机和电脑之间同步笔记和附件。")
+            : localize("使用插件独立空间同步知识库文件与非敏感插件状态。授权、模型密钥、外部路径和设备历史不会跨设备同步。{0}", localizeMessage(this.runtime.store.storageBoundaryText())) });
         const buildInfo = container.createEl("div", { cls: "smartmd-build-info" });
         buildInfo.addClass("smartmd-build-info");
         buildInfo.setText(localize("运行实例：v{0}", this.runtime.plugin.manifest.version));
@@ -1025,7 +1027,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                     .setCta()
                     .onClick(async () => {
                         if (this.runtime.oneDrive.isBusy()) return;
-                        new Notice(localize("[SmartMD v{0}] 正在检查并启动同步…", this.runtime.plugin.manifest.version), 3000);
+                        if (!Platform.isAndroidApp) {
+                            new Notice(localize("[SmartMD v{0}] 正在检查并启动同步…", this.runtime.plugin.manifest.version), 3000);
+                        }
                         button.setDisabled(true).setButtonText(localize("正在检查…"));
                         try {
                             await this.runtime.oneDrive.manualSync();
@@ -1675,6 +1679,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             .setName(localize("云端知识库"))
             .setDesc(settings.vaultName
                 ? localize("已连接：{0}", settings.vaultName)
+                : Platform.isAndroidApp ? localize("尚未连接 OneDrive 知识库")
                 : localize("首次同步时选择已有云端知识库，或创建新的独立空间。"));
         new Setting(container)
             .setName(localize("同步方式"))
