@@ -201,6 +201,12 @@ type FirstCommitJournal = {
     updatedAt: number;
 };
 
+type FirstUploadReadScope = {
+    signal: AbortSignal;
+    assertCurrent: () => void;
+    noteActivity: () => void;
+};
+
 export class SyncPreviewModal extends Modal {
     private submitted = false;
     private settled = false;
@@ -469,6 +475,9 @@ export class OneDriveSyncService {
     private activeRoundChangeVersion = 0;
     private observedSharedState = "";
     private statusListener: (() => void) | null = null;
+    private firstUploadInspection: { controller: AbortController; label: string } | null = null;
+    private firstUploadInspectionError = "";
+    private readonly firstUploadReadTimeoutMs = 30_000;
     private deleteGuard: ((path: string, readOnly?: boolean) => Promise<boolean>) | null = null;
     private ensuredRemoteFolders = new Set<string>();
     private ensuringRemoteFolders = new Map<string, Promise<void>>();
@@ -3005,7 +3014,9 @@ export class OneDriveSyncService {
         const settings = this.settings();
         if (settings.status === "stopping") return "正在停止，等待当前提交完成并核对状态";
         if (this.running || settings.status === "syncing") return "同步中";
-        if (this.preparing || settings.status === "checking") return "正在连接 OneDrive 并检查同步范围";
+        if (this.firstUploadInspection) return this.firstUploadInspection.label;
+        if (this.preparing) return "正在连接 OneDrive 并检查同步范围";
+        if (this.firstUploadInspectionError) return this.firstUploadInspectionError;
         if (settings.status === "partial_success") return localizeMessage(settings.lastError) || localize("部分同步完成（存在未同步文件）");
         if (settings.status === "failed") return localize("同步失败：{0}", localizeMessage(settings.lastError) || localize("未知原因"));
         if (settings.status === "paused") return settings.lastError ? localize("同步未完成：{0}", localizeMessage(settings.lastError)) : "已暂停";
@@ -3018,11 +3029,19 @@ export class OneDriveSyncService {
         return Boolean(this.operationJob) || this.preparing || this.running || this.settings().status === "stopping";
     }
 
+    canCancelFirstUploadInspection(): boolean {
+        return this.firstUploadInspection !== null && !this.firstUploadInspection.controller.signal.aborted;
+    }
+
+    cancelFirstUploadInspection(): void {
+        this.firstUploadInspection?.controller.abort(new Error(localize("已取消 OneDrive 文件检查，可以重试。")));
+    }
+
     actionLabel(): string {
         const status = this.settings().status;
         if (status === "stopping") return "正在停止…";
         if (status === "syncing" || this.running) return "同步中…";
-        if (status === "checking" || this.preparing) return "检查中…";
+        if (this.preparing) return "检查中…";
         return "立即同步";
     }
 
@@ -3074,8 +3093,8 @@ export class OneDriveSyncService {
             return this.canRun() ? await this.sync(false) : false;
         }
         this.preparing = true;
+        this.firstUploadInspectionError = "";
         this.notifyStatusChange();
-        const initialStatus = settings.status;
         const initialAccount = String((this.store as any).settings.local.microsoftAccountId || "");
         const initialGeneration = this.resumedApprovalGeneration;
         const assertFirstGrantCurrent = () => {
@@ -3084,7 +3103,6 @@ export class OneDriveSyncService {
                 throw new Error("首次预览的身份或许可已变化，必须重新预览");
             }
         };
-        settings.status = "checking"; // display-only; do not persist pre-confirmation changes
         try {
             if (!initialAccount) throw new Error("请先完成微软账号登录。");
             // Microsoft documents that the first approot GET can create the
@@ -3310,7 +3328,6 @@ export class OneDriveSyncService {
             this.activeFirstReceiverResume = false;
             this.pendingFirstChoice = null;
             this.previewVaultId = null;
-            if (settings.status === "checking") settings.status = initialStatus;
             this.preparing = false;
             this.notifyStatusChange();
         }
@@ -5120,8 +5137,8 @@ export class OneDriveSyncService {
         }
     }
 
-    private async assertFirstCommitGraphAccount(accountId: string): Promise<void> {
-        const identity: any = await this.graph("GET", "/me");
+    private async assertFirstCommitGraphAccount(accountId: string, scope?: FirstUploadReadScope): Promise<void> {
+        const identity: any = await this.graph("GET", "/me", undefined, undefined, scope?.assertCurrent);
         if (!accountId || !identity?.id || String(identity.id) !== accountId) {
             throw new Error("Microsoft Graph 当前账户与已批准账户不一致，停止云端提交。");
         }
@@ -5150,7 +5167,7 @@ export class OneDriveSyncService {
         return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
     }
 
-    private async currentFirstFileEntries(): Promise<FirstFileEntry[]> {
+    private async currentFirstFileEntries(scope?: FirstUploadReadScope, onFile?: (done: number, total: number) => void): Promise<FirstFileEntry[]> {
         const local = this.localFiles().sort((a, b) => a.path.localeCompare(b.path));
         const items: FirstFileEntry[] = [];
         if (this.skippedLocalPaths().size) {
@@ -5158,6 +5175,7 @@ export class OneDriveSyncService {
         }
         const archivedBinding = Boolean(this.settings().firstCommitJournal?.priorBindingArchive);
         for (const item of local) {
+            scope?.assertCurrent();
             if (!item.path || item.path.startsWith("/") || item.path.includes("\\")
                 || item.path !== normalizePath(item.path)
                 || item.path.split("/").some((part) => !part || part === "." || part === "..")
@@ -5167,6 +5185,7 @@ export class OneDriveSyncService {
             const data = await this.app.vault.readBinary(item.file);
             if (data.byteLength !== item.size) throw new Error("本地文件扫描与字节数据不一致，已停止。");
             items.push({ path: item.path, size: item.size, mtime: item.mtime, sha256: await this.firstFileHash(data) });
+            onFile?.(items.length, local.length);
         }
         if (new Set(items.map((item) => item.path)).size !== items.length) {
             throw new Error("本地文件路径重复，已停止首次传输。");
@@ -5196,10 +5215,10 @@ export class OneDriveSyncService {
         }
     }
 
-    private async verifyFirstFileRegistration(journal: FirstFileJournal): Promise<void> {
+    private async verifyFirstFileRegistration(journal: FirstFileJournal, scope?: FirstUploadReadScope): Promise<void> {
         this.assertFirstFileIdentity(journal);
-        await this.assertFirstCommitGraphAccount(journal.accountId);
-        const registry: any = await this.readSharedState("vaults/registry.json");
+        await this.assertFirstCommitGraphAccount(journal.accountId, scope);
+        const registry: any = await this.readSharedState("vaults/registry.json", scope);
         const registered = this.settings().firstCommitJournal as FirstCommitJournal;
         if (!Array.isArray(registry?.vaults) || !Array.isArray(registered?.registryBefore)) {
             throw new Error("云端注册表不完整，禁止文件传输。");
@@ -5214,20 +5233,14 @@ export class OneDriveSyncService {
         }
     }
 
-    private async readFirstCopyRemoteFiles(journal: FirstFileJournal): Promise<RemoteFile[]> {
-        const originalTarget = this.previewVaultId;
-        this.previewVaultId = journal.cloudVaultId;
-        try {
-            const items = await this.remoteFiles(true, true);
-            if (!Array.isArray(items) || items.some((item) => !item.id || !item.path || !item.etag
-                || !Number.isFinite(item.size))
-                || new Set(items.map((item) => item.path)).size !== items.length) {
-                throw new Error("云端文件列表缺失身份或不完整，禁止传输。");
-            }
-            return items;
-        } finally {
-            this.previewVaultId = originalTarget;
+    private async readFirstCopyRemoteFiles(journal: FirstFileJournal, scope?: FirstUploadReadScope, onPage?: (page: number) => void): Promise<RemoteFile[]> {
+        const items = await this.remoteFiles(true, true, { vaultId: journal.cloudVaultId, scope, onPage });
+        if (!Array.isArray(items) || items.some((item) => !item.id || !item.path || !item.etag
+            || !Number.isFinite(item.size))
+            || new Set(items.map((item) => item.path)).size !== items.length) {
+            throw new Error("云端文件列表缺失身份或不完整，禁止传输。");
         }
+        return items;
     }
 
     private async verifyFirstFileContent(
@@ -5447,9 +5460,13 @@ export class OneDriveSyncService {
         }
         const originalJournal = JSON.stringify(prior);
         const finishOnly = prior.stage === "FILES_COPIED";
-        const assertPreviousCurrent = () => {
+        const assertReadCurrent = () => {
             assertGrantCurrent();
-            if (settings.firstFileJournal !== prior || JSON.stringify(prior) !== originalJournal) {
+            if (settings.firstFileJournal !== prior) throw new Error("原文件操作已变化");
+        };
+        const assertPreviousCurrent = () => {
+            assertReadCurrent();
+            if (JSON.stringify(prior) !== originalJournal) {
                 throw new Error("原文件操作已变化");
             }
         };
@@ -5458,28 +5475,35 @@ export class OneDriveSyncService {
         const activePath = prior.activeUploadPath === undefined
             ? prior.files.find(file => !Object.prototype.hasOwnProperty.call(prior.completed, file.path))?.path
             : prior.activeUploadPath;
-        const inspect = async () => {
+        const inspect = () => this.runFirstUploadInspection(assertReadCurrent, async (scope, read) => {
             assertPreviousCurrent();
-            const files = finishOnly ? [] : await this.currentFirstFileEntries();
+            const files = finishOnly ? [] : await read(localize("正在核对本地同步文件"), progress =>
+                this.currentFirstFileEntries(scope, (done, total) => progress(localize("正在核对本地同步文件：{0}/{1}", done, total))));
             const ruleDigest = finishOnly ? prior.ruleDigest
                 : await contentHash(JSON.stringify([this.maxBytes(), settings.ignorePatterns || []]));
-            await this.verifyFirstFileRegistration(prior);
+            await read(localize("正在核对 OneDrive 账号和原知识库"), () => this.verifyFirstFileRegistration(prior, scope));
             const observed: FirstFileJournal["completed"] = {};
-            const remote = await this.readFirstCopyRemoteFiles(prior);
+            const remote = await read(localize("正在读取 OneDrive 文件清单"), progress =>
+                this.readFirstCopyRemoteFiles(prior, scope, page => progress(localize("正在读取 OneDrive 文件清单：第 {0} 页", page))));
             const approved = new Map(prior.files.map(file => [file.path, file]));
             const current = new Map(files.map(file => [file.path, file]));
-            for (const item of [...remote].sort((a, b) => a.path.localeCompare(b.path))) {
-                const file = approved.get(item.path);
-                const previous = Object.prototype.hasOwnProperty.call(prior.completed, item.path) ? prior.completed[item.path] : null;
-                if (!file || item.size !== file.size || (previous && (previous.id !== item.id || previous.etag !== item.etag)) ||
-                    await this.firstFileHash(await this.remoteBytes(item)) !== file.sha256) {
-                    throw new Error("远端已有文件无法核实，保留两端并禁止重新上传");
+            const ordered = [...remote].sort((a, b) => a.path.localeCompare(b.path));
+            let verified = 0;
+            await read(localize("正在核对已上传文件：{0}/{1}", verified, ordered.length), async (refreshDeadline) => {
+                for (const item of ordered) {
+                    const file = approved.get(item.path);
+                    const previous = Object.prototype.hasOwnProperty.call(prior.completed, item.path) ? prior.completed[item.path] : null;
+                    if (!file || item.size !== file.size || (previous && (previous.id !== item.id || previous.etag !== item.etag)) ||
+                        await this.firstFileHash(await this.remoteBytes(item, scope)) !== file.sha256) {
+                        throw new Error("远端已有文件无法核实，保留两端并禁止重新上传");
+                    }
+                    if (!finishOnly && current.get(item.path)?.sha256 !== file.sha256) {
+                        throw new Error(localize("已上传文件的本地版本已改动、移走或被排除：{0}。首次同步已暂停，两端文件均已保留。", redactOneDriveText(item.path)));
+                    }
+                    Object.defineProperty(observed, item.path, { value: { id: item.id, etag: item.etag }, enumerable: true });
+                    refreshDeadline(localize("正在核对已上传文件：{0}/{1}", ++verified, ordered.length));
                 }
-                if (!finishOnly && current.get(item.path)?.sha256 !== file.sha256) {
-                    throw new Error(localize("已上传文件的本地版本已改动、移走或被排除：{0}。首次同步已暂停，两端文件均已保留。", redactOneDriveText(item.path)));
-                }
-                Object.defineProperty(observed, item.path, { value: { id: item.id, etag: item.etag }, enumerable: true });
-            }
+            });
             if (Object.keys(prior.completed).some(path => !Object.prototype.hasOwnProperty.call(observed, path))) {
                 throw new Error("已上传的云端文件丢失，首次上传保持暂停");
             }
@@ -5493,7 +5517,7 @@ export class OneDriveSyncService {
             if (finishOnly) this.assertFinalizedFirstFileBaseline(prior);
             assertPreviousCurrent();
             return { files, ruleDigest, observed, unresolvedPath };
-        };
+        });
         const reviewed = await inspect();
         const missing = finishOnly ? [] : reviewed.files.map(file => file.path)
             .filter(path => !Object.prototype.hasOwnProperty.call(reviewed.observed, path));
@@ -5530,6 +5554,69 @@ export class OneDriveSyncService {
             return true;
         }, resolve, true).open());
         return settings.firstSyncCompleted === true;
+    }
+
+    private async runFirstUploadInspection<T>(
+        assertGrantCurrent: () => void,
+        inspect: (scope: FirstUploadReadScope,
+            read: <R>(label: string, task: (progress: (label: string) => void) => Promise<R>) => Promise<R>) => Promise<T>,
+    ): Promise<T> {
+        const controller = new AbortController();
+        const inspection = { controller, label: "" };
+        this.firstUploadInspection = inspection;
+        let timer = 0;
+        let lastPaint = 0;
+        let lastActivity = 0;
+        const scope: FirstUploadReadScope = {
+            signal: controller.signal,
+            assertCurrent: () => {
+                if (controller.signal.aborted) throw controller.signal.reason;
+                assertGrantCurrent();
+            },
+            noteActivity: () => {
+                scope.assertCurrent();
+                if (Date.now() - lastActivity >= 250) resetDeadline();
+            },
+        };
+        const resetDeadline = () => {
+            window.clearTimeout(timer);
+            lastActivity = Date.now();
+            timer = window.setTimeout(() => controller.abort(new Error(localize(
+                "OneDrive 检查超时（{0}）。已保留同步记录，可以重试。", inspection.label,
+            ))), this.firstUploadReadTimeoutMs);
+        };
+        const progress = (label: string) => {
+            scope.assertCurrent();
+            inspection.label = label;
+            resetDeadline();
+            if (Date.now() - lastPaint >= 250) {
+                lastPaint = Date.now();
+                this.notifyStatusChange();
+            }
+        };
+        let onAbort: () => void = () => {};
+        const aborted = new Promise<never>((_, reject) => {
+            onAbort = () => reject(controller.signal.reason);
+            controller.signal.addEventListener("abort", onAbort, { once: true });
+        });
+        try {
+            const result = await Promise.race([aborted, inspect(scope, async (label, task) => {
+                progress(label);
+                return await task(progress);
+            })]);
+            scope.assertCurrent();
+            return result;
+        } catch (error) {
+            if (controller.signal.aborted) this.firstUploadInspectionError = safeOneDriveError(error);
+            throw error;
+        } finally {
+            window.clearTimeout(timer);
+            controller.signal.removeEventListener("abort", onAbort);
+            // Invalidate any read that settled after cancellation.
+            controller.abort();
+            if (this.firstUploadInspection === inspection) this.firstUploadInspection = null;
+            this.notifyStatusChange();
+        }
     }
 
     private assertFinalizedFirstFileBaseline(journal: FirstFileJournal): void {
@@ -6148,22 +6235,29 @@ export class OneDriveSyncService {
         return parentId === rootId ? normalizePath(parts.join("/")) : "";
     }
 
-    private async remoteFiles(forceFull = false, readOnly = false): Promise<RemoteFile[]> {
+    private async remoteFiles(
+        forceFull = false, readOnly = false,
+        firstCopy?: { vaultId: string; scope?: FirstUploadReadScope; onPage?: (page: number) => void },
+    ): Promise<RemoteFile[]> {
+        firstCopy?.scope?.assertCurrent();
         this.ensureRemoteIdentityFresh();
+        const vaultId = firstCopy?.vaultId || this.previewVaultId || this.settings().vaultId;
+        const basePath = `vaults/${vaultId}/files`;
+        const guard = firstCopy?.scope?.assertCurrent;
         // Listing a sync scope must never create it. A missing remote folder
         // is an identity/preflight failure, not permission to POST a new folder.
         // Folder creation remains in separately authorized write paths.
         const loaded = readOnly
-            ? { vaultId: this.previewVaultId || this.settings().vaultId, rootId: "", deltaLink: "", nodes: {} as Record<string, any> }
+            ? { vaultId, rootId: "", deltaLink: "", nodes: {} as Record<string, any> }
             : this.loadRemoteDeltaCache();
         const cache = { ...loaded, nodes: { ...(loaded.nodes || {}) } };
         if (forceFull || !cache.deltaLink || !cache.rootId) {
-            const root = await this.graph("GET", `/drive/special/approot:/${encodePath(this.basePath())}`).catch((error: any) => {
+            const root = await this.graph("GET", `/drive/special/approot:/${encodePath(basePath)}`, undefined, undefined, guard).catch((error: any) => {
                 const confirmedNew = this.settings().firstCommitJournal as FirstCommitJournal | undefined;
                 if (readOnly && error?.status === 404
                     && (this.pendingFirstChoice?.mode === "new"
                         || (confirmedNew?.stage === "REGISTERED"
-                            && confirmedNew.identity.cloudVaultId === this.previewVaultId))) return null;
+                            && confirmedNew.identity.cloudVaultId === (firstCopy?.vaultId || this.previewVaultId)))) return null;
                 throw error;
             });
             if (readOnly && !root) return []; // New vault not created: a legitimate empty read-only target.
@@ -6181,7 +6275,7 @@ export class OneDriveSyncService {
                     throw new Error("云端增量清单分页循环或超出安全页数，已保留旧基线并停止");
                 }
                 visitedPages.add(next);
-                const page: any = await this.graph("GET", next);
+                const page: any = await this.graph("GET", next, undefined, undefined, guard);
                 if (!Array.isArray(page.value)) throw new Error("云端清单不完整，已暂停删除并等待重新比对");
                 for (const item of page.value || []) {
                     const id = String(item.id || "");
@@ -6219,6 +6313,7 @@ export class OneDriveSyncService {
                 if (!next && !page["@odata.deltaLink"]) {
                     throw new Error("云端清单没有完整结束证明，已保留上一轮关系并暂停删除");
                 }
+                firstCopy?.onPage?.(visitedPages.size);
             }
         } catch (error: any) {
             if (!readOnly && !forceFull && (error?.status === 400 || error?.status === 404 || error?.status === 410)) {
@@ -6228,6 +6323,7 @@ export class OneDriveSyncService {
             }
             throw error;
         }
+        guard?.();
         {
             const seenPaths = new Map<string, { id: string; etag: string; path: string }>();
             this.remoteIdentityConflict = null;
@@ -6243,7 +6339,7 @@ export class OneDriveSyncService {
                 if (previous) {
                     this.remoteIdentityConflict = {
                         accountId: String((this.store as any).settings.local.microsoftAccountId || ""),
-                        vaultId: this.basePath(), path: relative, items: [previous, item],
+                        vaultId: basePath, path: relative, items: [previous, item],
                     };
                     throw new Error("云端重复身份：" + redactOneDriveText(relative) + "；Item ID：" +
                         redactOneDriveText(previous.id) + " / " + redactOneDriveText(item.id) +
@@ -6664,8 +6760,9 @@ export class OneDriveSyncService {
         }
     }
 
-    private async remoteBytes(remote: RemoteFile): Promise<ArrayBuffer> {
-        const response = await this.downloadResponse(`/drive/items/${remote.id}`);
+    private async remoteBytes(remote: RemoteFile, scope?: FirstUploadReadScope): Promise<ArrayBuffer> {
+        const response = await this.downloadResponse(`/drive/items/${remote.id}`, scope);
+        scope?.assertCurrent();
         if (response.status < 200 || response.status >= 300) {
             const error: any = new Error(`下载失败：${remote.path} (HTTP ${response.status})`);
             error.status = response.status;
@@ -6674,7 +6771,8 @@ export class OneDriveSyncService {
         return response.arrayBuffer;
     }
 
-    private async downloadResponse(metadataPath: string): Promise<any> {
+    private async downloadResponse(metadataPath: string, scope?: FirstUploadReadScope): Promise<any> {
+        scope?.assertCurrent();
         let normalizedEndpoint = metadataPath.trim();
         if (normalizedEndpoint.includes("approot:") && normalizedEndpoint.endsWith(":")) {
             normalizedEndpoint = normalizedEndpoint.slice(0, -1);
@@ -6682,14 +6780,27 @@ export class OneDriveSyncService {
         const separator = normalizedEndpoint.includes("?") ? "&" : "?";
         const metadata = await (this.auth as any).requestGraph(
             `${normalizedEndpoint}${separator}$select=@microsoft.graph.downloadUrl`,
+            scope ? { beforeDispatch: scope.assertCurrent } : undefined,
         );
+        scope?.assertCurrent();
         if (metadata.status < 200 || metadata.status >= 300) return metadata;
         const downloadUrl = metadata.json?.["@microsoft.graph.downloadUrl"];
         if (!downloadUrl) throw new Error("OneDrive 未提供有效的文件下载地址");
         try {
-            const response = await fetch(downloadUrl, { cache: "no-store" });
+            const response = await fetch(downloadUrl, { cache: "no-store", signal: scope?.signal });
             if (!response.ok) throw new Error(`download failed (${response.status})`);
-            const arrayBuffer = await response.arrayBuffer();
+            const meter = scope && response.body && typeof TransformStream === "function"
+                ? new TransformStream<Uint8Array, Uint8Array>({
+                    transform(chunk, output) {
+                        scope.noteActivity();
+                        output.enqueue(chunk);
+                    },
+                })
+                : null;
+            const arrayBuffer = meter && response.body
+                ? await new Response(response.body.pipeThrough(meter)).arrayBuffer()
+                : await response.arrayBuffer();
+            scope?.assertCurrent();
             return {
                 status: response.status,
                 arrayBuffer,
@@ -6697,6 +6808,7 @@ export class OneDriveSyncService {
                 json: null,
             };
         } catch {
+            scope?.assertCurrent();
             return requestUrl({
                 url: downloadUrl,
                 method: "GET",
@@ -7313,8 +7425,9 @@ export class OneDriveSyncService {
         }
     }
 
-    private async readSharedState(path: string): Promise<any | null> {
-        const response = await this.downloadResponse(`/drive/special/approot:/${encodePath(path)}`);
+    private async readSharedState(path: string, scope?: FirstUploadReadScope): Promise<any | null> {
+        const response = await this.downloadResponse(`/drive/special/approot:/${encodePath(path)}`, scope);
+        scope?.assertCurrent();
         if (response.status === 404) return null;
         if (response.status < 200 || response.status >= 300) throw new Error(response.json?.error?.message || response.text || `无法读取插件状态 [${path}]`);
         try {

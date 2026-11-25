@@ -1014,7 +1014,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         if (!this.runtime.isMicrosoftSignedIn() && !this.runtime.isMicrosoftSignInPending()) {
             this.browserLoginFallbackSetting(container);
         }
-        new Setting(container)
+        const oneDriveStatus = new Setting(container)
             .setName(localize("同步状态"))
             .setDesc(statusDescription)
             .addButton((button) => {
@@ -1034,6 +1034,11 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                         }
                     });
             });
+        if (this.runtime.oneDrive.canCancelFirstUploadInspection()) {
+            oneDriveStatus.addButton(button => button
+                .setButtonText(localize("取消检查"))
+                .onClick(() => this.runtime.oneDrive.cancelFirstUploadInspection()));
+        }
 
         new Setting(container)
             .setName(localize("上次成功同步"))

@@ -856,12 +856,13 @@ export class MicrosoftAuth {
         return /invalid_grant|refresh token.*(?:invalid|expired|revoked)|revok|AADSTS70008|AADSTS700082/i.test(detail);
     }
 
-    async getAccessToken(forceRefresh = false): Promise<string> {
+    async getAccessToken(forceRefresh = false, readGuard?: () => void): Promise<string> {
         const epoch = this.sessionEpoch;
         const accountId = String(this.store.settings.local.microsoftAccountId || "");
         const token = this.store.getMicrosoftToken();
         if (!token) throw new Error("请先登录微软账号。");
         const requireOriginal = () => {
+            readGuard?.();
             this.assertMicrosoftSession(epoch, accountId);
             const live = this.store.getMicrosoftToken();
             if (!live || live.refreshToken !== token.refreshToken ||
@@ -915,6 +916,8 @@ export class MicrosoftAuth {
             : "https://graph.microsoft.com/v1.0" + pathOrUrl;
         const epoch = this.sessionEpoch;
         const accountId = String(this.store.settings.local.microsoftAccountId || "");
+        // A canceled read must not renew or invalidate the session on a late 401.
+        const readGuard = !options.method || options.method === "GET" ? options.beforeDispatch : undefined;
         const send = async (token: string): Promise<any> => {
             // Final synchronous gate: no await between this check, the
             // caller's operation ticket and the physical Graph dispatch.
@@ -934,10 +937,12 @@ export class MicrosoftAuth {
                 throw: false,
             });
         };
-        let response = await send(await this.getAccessToken());
+        let response = await send(await this.getAccessToken(false, readGuard));
+        readGuard?.();
         if (this.isGraphAuthFailure(response)) {
             this.assertMicrosoftSession(epoch, accountId);
-            response = await send(await this.getAccessToken(true));
+            response = await send(await this.getAccessToken(true, readGuard));
+            readGuard?.();
             if (this.isGraphAuthFailure(response)) {
                 this.assertMicrosoftSession(epoch, accountId);
                 await this.invalidateMicrosoftSession();

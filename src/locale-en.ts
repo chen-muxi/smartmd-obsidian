@@ -1640,4 +1640,13 @@ export const englishMessages: Readonly<Record<string, string>> = {
     "SmartMD: 正在复核已上传文件。": "SmartMD: Verifying uploaded files.",
     "SmartMD: 已完成绑定，可以开始下一次同步。": "SmartMD: Vault linked. You can run the next sync.",
     "首次上传记录与同步基线不一致，已保留两端文件。": "The first-upload record does not match the sync baseline. Both copies were kept.",
+    "正在核对本地同步文件": "Checking local files for sync",
+    "正在核对本地同步文件：{0}/{1}": "Checking local files: {0}/{1}",
+    "正在核对 OneDrive 账号和原知识库": "Checking your OneDrive account and existing vault",
+    "正在读取 OneDrive 文件清单": "Reading the OneDrive file list",
+    "正在读取 OneDrive 文件清单：第 {0} 页": "Reading the OneDrive file list: page {0}",
+    "正在核对已上传文件：{0}/{1}": "Verifying previously uploaded files: {0}/{1}",
+    "取消检查": "Cancel check",
+    "已取消 OneDrive 文件检查，可以重试。": "OneDrive file check canceled. You can retry.",
+    "OneDrive 检查超时（{0}）。已保留同步记录，可以重试。": "OneDrive check timed out ({0}). Your sync record was kept. You can retry.",
 };
