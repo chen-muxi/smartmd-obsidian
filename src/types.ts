@@ -167,6 +167,7 @@ export interface OneDriveSyncSettings {
     sharedStateHash: string;
     fileStates: Record<string, SyncFileState>;
     androidFirstDownload?: AndroidFirstDownload;
+    androidFirstMerge?: { accountId: string; cloudVaultId: string; proofId: string; deviceId: string };
     runAllowed: boolean;
     confirmed: boolean;
     /** Locally persisted account/cloud Vault binding; identity is not execution consent. */

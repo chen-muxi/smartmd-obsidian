@@ -1,5 +1,5 @@
 import { App } from "obsidian";
-import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
+import { getAndroidVaultRoot } from "./onedrive-android-vault";
 import type { AndroidFirstDownload } from "./types";
 
 /** Inventory only. ELIGIBLE is a preview prerequisite, NEVER execution consent. */
@@ -257,7 +257,7 @@ export async function inspectReceiverCandidateInventory(
     }
 }
 
-/** Read-only Android App storage inventory. No installation or execution permission is issued here. */
+/** Read-only Android Vault inventory. No installation or execution permission is issued here. */
 export async function inspectAndroidReceiverCandidateInventory(
     app: App,
     scope: ReceiverCurrentInstallation,
@@ -265,7 +265,7 @@ export async function inspectAndroidReceiverCandidateInventory(
 ): Promise<ReceiverCandidateAudit> {
     const vault = app.vault;
     const adapter = vault.adapter;
-    const root = getAndroidAppStorageRoot(adapter);
+    const root = getAndroidVaultRoot(adapter);
     let inspectedEntries = 0;
     const result = (status: ReceiverCandidateAudit["status"], reason: string): ReceiverCandidateAudit => ({
         status, reason, inspectedEntries, rootBirthtimeMs: null,
@@ -274,7 +274,7 @@ export async function inspectAndroidReceiverCandidateInventory(
     const safe = (path: string) => Boolean(path) && path.split("/").every(
         part => part && part !== "." && part !== ".." && !/[\\:\u0000-\u001f]/.test(part),
     );
-    const currentRoot = () => vault.adapter === adapter && getAndroidAppStorageRoot(adapter) === root;
+    const currentRoot = () => vault.adapter === adapter && getAndroidVaultRoot(adapter) === root;
     if (!root || vault.configDir !== ".obsidian") return result("BLOCKED", "ANDROID_PRIVATE_VAULT_UNPROVEN");
     const tracked = new Set(incomplete?.trackedPaths ?? []);
     const intent = incomplete?.android?.intent;

@@ -22,6 +22,7 @@ import {
 } from "./types";
 import { OperationAuthority, RunTicket } from "./operation-authority";
 import { inspectAndroidReceiverCandidateInventory, inspectReceiverCandidateInventory } from "./onedrive-receiver-audit";
+import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
 import { placeAndroidStagedFile, replaceAndroidBinaryIfUnchanged, replaceAndroidMarkdownIfUnchanged } from "./onedrive-android-write";
 import { redactOneDriveText, safeOneDriveError } from "./onedrive-error-redaction";
 
@@ -51,6 +52,7 @@ type RemoteVault = {
     updatedAt: number;
     registrationOpId?: string;
     registerIdentical?: boolean;
+    mergeAndroid?: boolean;
 };
 
 type SyncPreviewItem = {
@@ -120,12 +122,14 @@ async function contentHash(value: string): Promise<string> {
 interface PreparedSync {
     local: LocalFile[];
     allRemote: RemoteFile[];
+    androidMerge?: Map<string, { action: "upload" | "download" | "same"; localHash?: string; remoteHash?: string }>;
 }
 
 type PendingFirstChoice = {
     id: string;
     name: string;
     mode: "new" | "existing";
+    mergeAndroid?: boolean;
 };
 
 type FirstConnectionSnapshot = {
@@ -347,6 +351,7 @@ class VaultSelectionModal extends Modal {
         private choose: (choice: RemoteVault | "new" | null) => void,
         private readonly eligibleReceiver = false,
         private readonly allowDesktopRegistration = false,
+        private readonly allowAndroidMerge = false,
     ) {
         super(app);
     }
@@ -370,6 +375,10 @@ class VaultSelectionModal extends Modal {
             // Vault. Selection is still READ-ONLY, not execution consent.
             receive.disabled = !this.eligibleReceiver;
             if (this.eligibleReceiver) receive.onclick = () => this.finish(vault);
+            if (this.allowAndroidMerge) {
+                item.createEl("button", { text: localize("连接当前知识库并预览同步") }).onclick =
+                    () => this.finish({ ...vault, mergeAndroid: true });
+            }
             if (this.allowDesktopRegistration) {
                 item.createEl("button", { text: localize("高级：仅登记完全一致的内容") }).onclick =
                     () => this.finish({ ...vault, registerIdentical: true });
@@ -384,10 +393,8 @@ class VaultSelectionModal extends Modal {
         this.contentEl.createEl("button", {
             text: localize("两份都保留，不合并"),
         }).onclick = () => this.close();
-        const merge = this.contentEl.createEl("button", { text: localize("查看差异并安全合并") });
-        merge.disabled = true;
-        this.contentEl.createEl("p", {
-            text: localize("合并现有知识库需要先核对双端文件版本，当前不可用。"),
+        if (this.allowAndroidMerge) this.contentEl.createEl("p", {
+            text: localize("首次连接会预览上传和下载，不会同步删除。两端都有的文件保留较新版本，同时间以 OneDrive 为准。"),
         });
     }
 
@@ -1443,7 +1450,8 @@ export class OneDriveSyncService {
         const local: any = (this.store as any).settings.local;
         const accountId = String(local.microsoftAccountId || "");
         return Boolean(accountId && s.confirmed === true
-            && s.firstSyncCompleted === true && s.runAllowed === false
+            && (s.firstSyncCompleted === true || this.androidFirstMergeIsTrusted(accountId, s.vaultId))
+            && s.runAllowed === false
             && s.enabled === false
             && s.confirmationAccountId === accountId
             && s.confirmationVaultId === s.vaultId
@@ -2567,19 +2575,24 @@ export class OneDriveSyncService {
             if (!choice) return false;
             this.previewVaultId = choice.id;
             if (this.identicalRegistrationRequested) return await this.performIdenticalRegistrationPreview(choice.id);
-            await this.assertFirstReceiverIdentity(choice, initialAccount);
+            const mergeAndroid = choice.mergeAndroid === true;
+            if (mergeAndroid) {
+                if (!this.androidFirstMergeIsTrusted(initialAccount, choice.id) && !this.canStartAndroidFirstMerge(initialAccount)) {
+                    throw new Error(localize("当前知识库已有同步历史或身份已变化，请重新核对。"));
+                }
+            } else await this.assertFirstReceiverIdentity(choice, initialAccount);
             const prepared = await this.captureFirstConnectionSnapshot();
             if (String((this.store as any).settings.local.microsoftAccountId || "") !== initialAccount) {
                 throw new Error("微软账号已切换，请重新检查。");
             }
             const local = prepared.local;
             const allRemote = prepared.remote;
-            const resumingReceiver = choice.mode === "existing" &&
+            const resumingReceiver = choice.mode === "existing" && !mergeAndroid &&
                 this.incompleteFirstReceiverScope(initialAccount, choice.id);
             if (resumingReceiver) {
                 await this.assertIncompleteFirstReceiverFiles(
                     initialAccount, choice.id, local, allRemote);
-            } else if (choice.mode === "existing" &&
+            } else if (choice.mode === "existing" && !mergeAndroid &&
                 (local.length > 0 || Object.keys(settings.fileStates || {}).length > 0 ||
                  ((this.store as any).settings.local.recoveryEntries || []).length > 0)) {
                 throw new Error("云端是另一份独立知识库。请在独立且严格验空的 Vault 中连接；已接收过一部分的库必须有可信原绑定与历史记录，禁止未经核对直接覆盖。");
@@ -2589,14 +2602,28 @@ export class OneDriveSyncService {
             const remoteMap = new Map(remote.map((item) => [item.path, item]));
             const uploadPaths = local.filter((item) => !remoteMap.has(item.path)).map((item) => item.path).sort();
             const downloadPaths = remote.filter((item) => !localPaths.has(item.path)).map((item) => item.path).sort();
+            const localFingerprints = new Map<string, string>(
+                prepared.snapshot.localVersions.map((value) => {
+                    const [path, , , sha256] = JSON.parse(value) as [string, number, number, string];
+                    return [path, sha256];
+                }),
+            );
             const samePaths: string[] = [];
             const unknownPaths: string[] = [];
+            const plannedRemoteHashes = new Map<string, string>();
             for (const item of local) {
                 const counterpart = remoteMap.get(item.path);
                 if (!counterpart) continue;
                 try {
-                    const localContent = await this.app.vault.readBinary(item.file);
+                    const localContent = mergeAndroid
+                        ? await this.app.vault.adapter.readBinary(item.path)
+                        : await this.app.vault.readBinary(item.file);
+                    if (mergeAndroid && await this.sha256Bytes(localContent) !== localFingerprints.get(item.path)) {
+                        throw new Error(localize("本机文件在同步时变化，请重新同步。"));
+                    }
                     const remoteContent = await this.remoteBytes(counterpart);
+                    if (remoteContent.byteLength !== counterpart.size) throw new Error("OneDrive file size changed");
+                    if (mergeAndroid) plannedRemoteHashes.set(item.path, await this.sha256Bytes(remoteContent));
                     if (sameBytes(localContent, remoteContent)) samePaths.push(item.path);
                     else if (await this.oneDriveVersionWins(item.path, item.mtime, counterpart)) downloadPaths.push(item.path);
                     else uploadPaths.push(item.path);
@@ -2616,12 +2643,55 @@ export class OneDriveSyncService {
             const allRemoteMap = new Map(allRemote.map((item) => [item.path, item]));
             // Reuse the already byte-verified snapshot: do not read excluded
             // configuration, recovery content or oversized bodies for display.
-            const localFingerprints = new Map<string, string>(
-                prepared.snapshot.localVersions.map((value) => {
-                    const [path, , , sha256] = JSON.parse(value) as [string, number, number, string];
-                    return [path, sha256];
-                }),
-            );
+            const androidMerge: PreparedSync["androidMerge"] = mergeAndroid ? new Map() : undefined;
+            if (androidMerge) {
+                const skipped = new Set(skippedPaths);
+                const exactPaths = new Map<string, { path: string; isFile: boolean }>();
+                for (const path of [...localPaths, ...remoteMap.keys()]) {
+                    if (skipped.has(path)) continue;
+                    const parts = path.split("/");
+                    let prefix = "";
+                    for (const [index, part] of parts.entries()) {
+                        prefix = prefix ? prefix + "/" + part : part;
+                        const isFile = index === parts.length - 1;
+                        const key = prefix.normalize("NFC").toLocaleLowerCase("en-US");
+                        const existing = exactPaths.get(key);
+                        if (existing && (existing.path !== prefix || existing.isFile !== isFile)) {
+                            throw new Error(localize("两端文件或文件夹名称不兼容，请先核对：{0}", prefix));
+                        }
+                        exactPaths.set(key, { path: prefix, isFile });
+                    }
+                }
+                // The first round adds files in either direction; it cannot infer a
+                // deletion for a missing entry in a previously verified baseline.
+                for (const path of Object.keys(settings.fileStates || {})) {
+                    if (!skipped.has(path) && (!localPaths.has(path) || !remoteMap.has(path))) {
+                        throw new Error(localize("首次连接中已同步的文件一端缺失，请核对后重试。"));
+                    }
+                }
+                for (const [action, paths] of [["upload", uploadPaths], ["download", downloadPaths], ["same", samePaths]] as const) {
+                    for (const path of paths) {
+                        if (skipped.has(path)) continue;
+                        let remoteHash = plannedRemoteHashes.get(path);
+                        if (action === "download" && !remoteHash) {
+                            try {
+                                const peer = remoteMap.get(path)!;
+                                const content = await this.remoteBytes(peer);
+                                if (content.byteLength !== peer.size) throw new Error("OneDrive file size changed");
+                                remoteHash = await this.sha256Bytes(content);
+                            } catch {
+                                unknownPaths.push(path);
+                                continue;
+                            }
+                        }
+                        androidMerge.set(path, { action, localHash: localFingerprints.get(path), remoteHash });
+                    }
+                    // A path excluded on either side should not appear in an approved transfer.
+                    for (let i = paths.length - 1; i >= 0; i--) {
+                        if (skipped.has(paths[i])) paths.splice(i, 1);
+                    }
+                }
+            }
             const items: Record<string, SyncPreviewItem> = {};
             for (const path of new Set([...localPaths, ...allRemoteMap.keys(), ...skippedPaths])) {
                 const raw = rawLocalMap.get(path);
@@ -2669,7 +2739,11 @@ export class OneDriveSyncService {
                     async (reportProgress) => {
                         assertFirstGrantCurrent();
                         await this.assertFirstConnectionSnapshotFresh(prepared.snapshot);
-                        if (choice.mode === "existing") {
+                        if (mergeAndroid) {
+                            if (!this.androidFirstMergeIsTrusted(initialAccount, choice.id) && !this.canStartAndroidFirstMerge(initialAccount)) {
+                                throw new Error(localize("当前知识库已有同步历史或身份已变化，请重新核对。"));
+                            }
+                        } else if (choice.mode === "existing") {
                             await this.assertFirstReceiverIdentity(choice, initialAccount);
                             if (resumingReceiver) {
                                 if (preview.uploadCount ||
@@ -2738,11 +2812,17 @@ export class OneDriveSyncService {
                             return true;
                         }
                         if (choice.mode !== "existing" ||
-                            (!resumingReceiver && (this.localFiles().length ||
+                            (!mergeAndroid && !resumingReceiver && (this.localFiles().length ||
                                 Object.keys(settings.fileStates || {}).length))) {
                             throw new Error("不具备可信独立空库或已核验的首次接收续传条件");
                         }
                         if (Platform.isAndroidApp) assertFirstGrantCurrent();
+                        const beforeBinding = {
+                            confirmed: settings.confirmed, runAllowed: settings.runAllowed,
+                            vaultId: settings.vaultId, confirmationVaultId: settings.confirmationVaultId,
+                            confirmationAccountId: settings.confirmationAccountId, vaultName: settings.vaultName,
+                            androidFirstMerge: settings.androidFirstMerge,
+                        };
                         this.authority.confirm(settings);
                         settings.confirmed = true;
                         settings.runAllowed = true;
@@ -2750,11 +2830,22 @@ export class OneDriveSyncService {
                         settings.confirmationVaultId = choice.id;
                         settings.confirmationAccountId = initialAccount;
                         settings.vaultName = choice.name;
-                        await (this.store as any).save();
+                        if (mergeAndroid) settings.androidFirstMerge = {
+                            accountId: initialAccount, cloudVaultId: choice.id,
+                            proofId: settings.installationProofId!, deviceId: settings.deviceId,
+                        };
+                        try { await this.store.saveWithIdentityGuard(assertFirstGrantCurrent); }
+                        catch (error) {
+                            if (this.settings() === settings && this.resumedApprovalGeneration === initialGeneration) {
+                                Object.assign(settings, beforeBinding);
+                                settings.runAllowed = false;
+                            }
+                            throw error;
+                        }
                         this.activeFirstReceiverResume = resumingReceiver;
                         this.setActiveFirstSyncTicket("manual-first-sync-" + Date.now());
                         return await this.sync(true, {
-                            local, allRemote,
+                            local, allRemote, androidMerge,
                         }, reportProgress);
                     },
                     resolve,
@@ -3079,7 +3170,7 @@ export class OneDriveSyncService {
             ).reason;
 
             const firstSyncMatches = new Map<string, boolean>();
-            if (firstSync) {
+            if (firstSync && !prepared?.androidMerge) {
                 const candidates = [...allPaths].filter((path) => localMap.has(path) && remoteMap.has(path) && !previous[path]);
                 let cursor = 0;
                 let completed = 0;
@@ -3185,6 +3276,48 @@ export class OneDriveSyncService {
                     while (attempts < 2) {
                         attempts++;
                         try {
+                            if (prepared?.androidMerge) {
+                                const plan = prepared.androidMerge.get(path);
+                                if (!plan) break;
+                                const localBytes = localItem ? await this.app.vault.adapter.readBinary(path) : null;
+                                if (Boolean(localBytes) !== Boolean(plan.localHash) ||
+                                    (localBytes && await this.sha256Bytes(localBytes) !== plan.localHash)) {
+                                    throw new Error(localize("本机文件在同步时变化，请重新同步。"));
+                                }
+                                await this.assertFresh(operation, path, localItem, remoteItem);
+                                let id = remoteItem?.id, etag = remoteItem?.etag;
+                                let localHash = plan.localHash;
+                                if (plan.action === "upload" && localBytes) {
+                                    if (remoteItem && (!plan.remoteHash ||
+                                        await this.sha256Bytes(await this.remoteBytes(remoteItem)) !== plan.remoteHash)) {
+                                        throw new Error(localize("云端文件在同步时变化，请重新同步。"));
+                                    }
+                                    const uploaded = await this.uploadStaged(operation, path, localBytes, false, remoteItem || null);
+                                    id = uploaded.id;
+                                    etag = uploaded.eTag || uploaded.etag;
+                                } else if (plan.action === "download" && remoteItem) {
+                                    localHash = await this.download(operation, remoteItem, path, localItem, false,
+                                        plan.localHash, plan.remoteHash);
+                                }
+                                if (plan.action === "same" && (!remoteItem || !plan.remoteHash || plan.localHash !== plan.remoteHash ||
+                                    await this.sha256Bytes(await this.remoteBytes(remoteItem)) !== plan.remoteHash)) {
+                                    throw new Error(localize("云端文件在同步时变化，请重新同步。"));
+                                }
+                                const current = this.app.vault.getAbstractFileByPath(path);
+                                if (!(current instanceof TFile) || !id || !etag || !localHash ||
+                                    await this.sha256Bytes(await this.app.vault.adapter.readBinary(path)) !== localHash) {
+                                    throw new Error(localize("本机文件在同步时变化，请重新同步。"));
+                                }
+                                next[path] = {
+                                    localMtime: current.stat.mtime, localSize: current.stat.size, localHash,
+                                    remoteId: id, remoteEtag: etag,
+                                };
+                                // Persist verified unchanged baselines before declaring the binding complete.
+                                if (plan.action === "same") unchangedCount++;
+                                else successCount++;
+                                await flushIfNeeded();
+                                break;
+                            }
                             if (firstReceiverResume) {
                                 if (localItem && remoteItem && old) {
                                     // Resume is DOWNLOAD-ONLY. Do not reinterpret a
@@ -3490,6 +3623,7 @@ export class OneDriveSyncService {
             }
             const wasFirstCompleted = settings.firstSyncCompleted === true;
             const lastConfirmedSuccessAt = settings.lastSuccessAt;
+            const firstMerge = settings.androidFirstMerge;
             settings.fileStates = this.mergePendingUploadBaselines(next);
             settings.lastSkippedCount = skippedPaths.size;
             settings.failedDiagnostics = [];
@@ -3510,6 +3644,7 @@ export class OneDriveSyncService {
                 this.assertCurrent(operation);
                 await (this.store as any).save();
                 settings.firstSyncCompleted = true;
+                delete settings.androidFirstMerge;
                 settings.status = "ready";
                 settings.lastSuccessAt = Date.now();
                 settings.lastError = "";
@@ -3517,6 +3652,7 @@ export class OneDriveSyncService {
                 await (this.store as any).save();
             } catch (error) {
                 settings.firstSyncCompleted = wasFirstCompleted;
+                if (firstMerge) settings.androidFirstMerge = firstMerge;
                 settings.lastSuccessAt = lastConfirmedSuccessAt;
                 throw error;
             }
@@ -3709,7 +3845,6 @@ export class OneDriveSyncService {
         expectedRemote: RemoteFile | undefined,
     ): Promise<void> {
         this.assertCurrent(operation);
-        const local = this.localFiles().find((item) => item.path === path);
         let remote: RemoteFile | null | undefined = undefined;
         if (typeof (this.auth as any)?.graph === "function") {
             remote = await this.readRemoteFileMetadata(path, false);
@@ -3717,6 +3852,7 @@ export class OneDriveSyncService {
             remote = (await this.remoteFiles(false)).find((item) => item.path === path);
         }
         this.assertCurrent(operation);
+        const local = this.localFiles().find((item) => item.path === path);
         const localMatches = expectedLocal
             ? local?.mtime === expectedLocal.mtime && local?.size === expectedLocal.size
             : !local;
@@ -3889,14 +4025,17 @@ export class OneDriveSyncService {
         const validRemote = (file: RemoteFile | null | undefined) =>
             file?.id === intent.remoteId && file.etag === intent.remoteEtag && file.size === intent.size;
         if (!validRemote(remote) || !validRemote(currentRemote) ||
-            target !== Boolean(local) || (staging && target)) {
+            target !== Boolean(local) || (staging && target && getAndroidAppStorageRoot(adapter))) {
             throw new Error("安卓首次下载的待核对文件或云端版本已变化");
         }
         if (target || staging) {
-            const bytes = await this.readPhysicalBinary(target ? intent.path : intent.stagingPath);
-            if (bytes.byteLength !== intent.size || await this.sha256Bytes(bytes) !== intent.sha256 ||
-                !sameBytes(bytes, await this.remoteBytes(remote!))) {
-                throw new Error("安卓首次下载的原件或暂存文件字节不符，保留现场");
+            const cloudBytes = await this.remoteBytes(remote!);
+            for (const path of [target ? intent.path : "", staging ? intent.stagingPath : ""].filter(Boolean)) {
+                const bytes = await adapter.readBinary(path);
+                if (bytes.byteLength !== intent.size || await this.sha256Bytes(bytes) !== intent.sha256 ||
+                    !sameBytes(bytes, cloudBytes)) {
+                    throw new Error("安卓首次下载的原件或暂存文件字节不符，保留现场");
+                }
             }
         }
         if (this.androidFirstDownloadIntent() !== intent) throw new Error("安卓首次下载操作身份已变化");
@@ -4109,6 +4248,33 @@ export class OneDriveSyncService {
         }
     }
 
+    private canStartAndroidFirstMerge(accountId: string): boolean {
+        const settings = this.settings();
+        const local = this.store.settings.local;
+        return Boolean(Platform.isAndroidApp && accountId && local.microsoftAccountId === accountId &&
+            this.store.installationProofIsValid() && settings.installationProofId && settings.deviceId &&
+            !settings.firstSyncCompleted && !settings.confirmed && !settings.runAllowed && !settings.enabled &&
+            !settings.confirmationAccountId && !settings.confirmationVaultId && !settings.cloudVaultId &&
+            !settings.androidFirstMerge && !settings.androidFirstDownload &&
+            !settings.firstCommitJournal && !settings.firstFileJournal && !settings.identicalRegistrationJournal &&
+            !(settings as any).firstConflictPreservationJournal &&
+            !Object.keys(settings.fileStates || {}).length && !Object.keys(settings.pendingUploadOperations || {}).length &&
+            !Object.keys(settings.pendingDeletions || {}).length && !Object.keys(settings.pendingConflicts || {}).length &&
+            !local.recoveryEntries?.length);
+    }
+
+    private androidFirstMergeIsTrusted(accountId: string, cloudVaultId: string): boolean {
+        const settings = this.settings();
+        const record = settings.androidFirstMerge;
+        return Boolean(Platform.isAndroidApp && accountId && cloudVaultId && !settings.firstSyncCompleted &&
+            settings.confirmed && record && this.store.settings.local.microsoftAccountId === accountId &&
+            settings.confirmationAccountId === accountId && settings.confirmationVaultId === cloudVaultId &&
+            settings.vaultId === cloudVaultId && record.accountId === accountId && record.cloudVaultId === cloudVaultId &&
+            record.proofId === settings.installationProofId && record.deviceId === settings.deviceId &&
+            this.store.installationProofIsValid() && !settings.firstCommitJournal &&
+            !settings.firstFileJournal && !settings.androidFirstDownload);
+    }
+
     private async prepareVaultIdentity(): Promise<boolean> {
         // Discovery is deliberately read-only; in-memory selections are not durable binding.
         this.pendingFirstChoice = null;
@@ -4131,6 +4297,13 @@ export class OneDriveSyncService {
             }
         }
         const current = vaults.find((vault) => vault.id === settings.vaultId);
+        if (settings.androidFirstMerge) {
+            if (!current || !this.androidFirstMergeIsTrusted(accountId, current.id)) {
+                throw new Error(localize("当前知识库已有同步历史或身份已变化，请重新核对。"));
+            }
+            this.pendingFirstChoice = { id: current.id, name: current.name, mode: "existing", mergeAndroid: true };
+            return true;
+        }
         if (current && this.incompleteFirstReceiverScope(accountId, current.id)) {
             // Do not inherit runAllowed from the old process. Reopen read-only
             // preview of the SAME registered cloud Vault; final click is new.
@@ -4161,7 +4334,7 @@ export class OneDriveSyncService {
         const eligibleReceiver = await this.freshFirstReceiverEligible(accountId);
         const choice = await new Promise<RemoteVault | "new" | null>((resolve) => {
             new VaultSelectionModal(this.app, vaults, resolve, eligibleReceiver,
-                Platform.isDesktopApp && Platform.isWin).open();
+                Platform.isDesktopApp && Platform.isWin, !eligibleReceiver && this.canStartAndroidFirstMerge(accountId)).open();
         });
         if (!choice) return false;
         if (choice === "new") {
@@ -4172,7 +4345,7 @@ export class OneDriveSyncService {
         } else {
             const match = vaults.find((vault) => vault.id === choice.id);
             if (!match) throw new Error("云端知识库选择已过期，需重新检查。");
-            this.pendingFirstChoice = { id: match.id, name: match.name, mode: "existing" };
+            this.pendingFirstChoice = { id: match.id, name: match.name, mode: "existing", mergeAndroid: choice.mergeAndroid };
             this.identicalRegistrationRequested = choice.registerIdentical === true;
         }
         return true;
@@ -5250,7 +5423,9 @@ export class OneDriveSyncService {
         const local = this.localFiles();
         const localVersions: string[] = [];
         for (const item of local) {
-            const data = await this.app.vault.readBinary(item.file);
+            const data = choice.mergeAndroid
+                ? await this.app.vault.adapter.readBinary(item.path)
+                : await this.app.vault.readBinary(item.file);
             if (data.byteLength !== item.size) throw new Error("预览期间本机文件版本发生变化");
             localVersions.push(JSON.stringify([item.path, item.size, item.mtime, await this.sha256Bytes(data)]));
         }
@@ -6312,7 +6487,10 @@ export class OneDriveSyncService {
         expectedRemoteHash?: string,
     ): Promise<string> {
         this.assertCurrent(operation);
-        const before = expectedLocal ? await this.app.vault.readBinary(expectedLocal.file) : null;
+        const vault = this.app.vault;
+        const adapter = vault.adapter;
+        const sharedAndroid = Platform.isAndroidApp && !getAndroidAppStorageRoot(adapter);
+        const before = expectedLocal ? await adapter.readBinary(path) : null;
         if (expectedLocalHash && (!before || await this.sha256Bytes(before) !== expectedLocalHash)) {
             throw new Error("本机笔记已在最终预览后修改，保留原件");
         }
@@ -6360,7 +6538,8 @@ export class OneDriveSyncService {
             const current = this.app.vault.getAbstractFileByPath(path);
             if (current instanceof TFile) {
                 if (!expectedLocal || current !== expectedLocal.file || !before ||
-                    !sameBytes(await this.app.vault.readBinary(current), before)) {
+                    !sameBytes(await adapter.readBinary(path), before) ||
+                    vault.getAbstractFileByPath(path) !== current || vault.adapter !== adapter) {
                     throw new Error(localize("本机文件在同步时变化，请重新同步。"));
                 }
                 this.assertCurrent(operation);
@@ -6369,7 +6548,7 @@ export class OneDriveSyncService {
                         await replaceAndroidMarkdownIfUnchanged(
                             this.app.vault, current, path, before, data, () => this.assertCurrent(operation), writeOptions,
                         );
-                    } else if (Platform.isAndroidApp) {
+                    } else if (Platform.isAndroidApp && !sharedAndroid) {
                         await replaceAndroidBinaryIfUnchanged(
                             this.app.vault, current, path, stagingPath, before, data, () => this.assertCurrent(operation),
                         );
@@ -6380,16 +6559,18 @@ export class OneDriveSyncService {
                     throw new Error("Obsidian 文件更新失败，请重新同步核对");
                 }
             } else {
-                if (await this.app.vault.adapter.exists(path)) {
+                if (expectedLocal || await adapter.exists(path) ||
+                    vault.getAbstractFileByPath(path) || vault.adapter !== adapter) {
                     throw new Error("未被索引的原文件已存在，拒绝覆盖");
                 }
-                if (Platform?.isAndroidApp) {
+                this.assertCurrent(operation);
+                if (Platform.isAndroidApp && !sharedAndroid) {
                     await placeAndroidStagedFile(this.app.vault, stagingPath, path, () => this.assertCurrent(operation));
                 } else {
                     await this.app.vault.createBinary(path, data, writeOptions);
                 }
             }
-            const actual = await this.readPhysicalBinary(path);
+            const actual = await adapter.readBinary(path);
             if (!sameBytes(actual, data)) {
                 throw new Error("知识库落地读回校验失败，请重新同步核对");
             }
@@ -6649,6 +6830,17 @@ export class OneDriveSyncService {
     private async createAndroidLocalCopy(
         path: string, bytes: ArrayBuffer, assertCurrent: () => void = () => {},
     ): Promise<void> {
+        const adapter = this.app.vault.adapter;
+        if (!getAndroidAppStorageRoot(adapter)) {
+            await this.ensureLocalFolder(path);
+            if (await adapter.exists(path) || this.app.vault.getAbstractFileByPath(path) ||
+                this.app.vault.adapter !== adapter) throw new Error("安卓端恢复位置已占用，保留现有文件");
+            assertCurrent();
+            if (path.startsWith(".")) await adapter.writeBinary(path, bytes);
+            else await this.app.vault.createBinary(path, bytes);
+            if (!sameBytes(await adapter.readBinary(path), bytes)) throw new Error("安卓端副本落地读回失败：" + path);
+            return;
+        }
         const stage = ".suite-staging/onedrive/" + crypto.randomUUID() + "/copy.bin";
         await this.ensureLocalFolder(path);
         await this.ensureLocalFolder(stage);

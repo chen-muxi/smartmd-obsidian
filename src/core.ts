@@ -1,7 +1,7 @@
 import { localizeMessage } from "./localization";
 import { App, Notice, Platform, Plugin, requestUrl } from "obsidian";
 import { MicrosoftDeviceCodeSession, MicrosoftDeviceToken } from "./microsoft-device-flow";
-import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
+import { getAndroidVaultRoot } from "./onedrive-android-vault";
 
 const MICROSOFT_CLIENT_ID = "0ad3b293-4c9e-4d7a-94a3-7043c8bb6248";
 const MICROSOFT_REDIRECT_URI = "obsidian://smartkeep-connect-onedrive";
@@ -60,7 +60,7 @@ export class SmartMDStore {
 
     private currentPhysicalVaultRoot(): string {
         const adapter = this.app.vault.adapter;
-        if (Platform?.isAndroidApp) return getAndroidAppStorageRoot(adapter);
+        if (Platform?.isAndroidApp) return getAndroidVaultRoot(adapter);
         const desktop = adapter as Partial<{ getBasePath(): string; basePath: string; fullPath: string }>;
         const raw = typeof desktop?.getBasePath === "function"
             ? desktop.getBasePath()

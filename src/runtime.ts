@@ -25,7 +25,7 @@ import { MicrosoftDeviceCodeModal } from "./microsoft-device-modal";
 import { ExternalSyncService } from "./external-sync";
 import { OneDriveSyncService } from "./onedrive";
 import { safeOneDriveError } from "./onedrive-error-redaction";
-import { getAndroidAppStorageRoot } from "./onedrive-android-vault";
+import { getAndroidVaultRoot } from "./onedrive-android-vault";
 import { PublishService } from "./publish";
 import { SmartKeepAuth } from "./smartkeep-auth";
 import { SyncFailureDiagnostic, SMARTKEEP_PUBLISH_URL } from "./types";
@@ -56,7 +56,7 @@ export class SmartMDRuntime {
 
     get supportsOneDrive(): boolean {
         if (Platform.isAndroidApp) {
-            return Boolean(getAndroidAppStorageRoot(this.app.vault.adapter));
+            return Boolean(getAndroidVaultRoot(this.app.vault.adapter));
         }
         return Platform.isDesktopApp && Platform.isWin;
     }
