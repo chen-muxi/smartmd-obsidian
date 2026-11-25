@@ -2394,7 +2394,7 @@ export class ExternalSyncService {
         } catch (error) {
             if (binding.recoveryInProgress === item.id) {
                 binding.status = "paused";
-                binding.lastError = localize("恢复未完整完成，已暂停同步并保留两端备份。");
+                binding.lastError = localize("恢复未完整完成，已暂停同步并保留两端备份。") + " " + localizeMessage(String((error as Error)?.message || error));
                 await this.store.save();
             }
             throw error;
@@ -2582,17 +2582,29 @@ export class ExternalSyncService {
         return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     }
 
-    private async replaceExternalWithBackup(staged: string, target: string, backup: string): Promise<void> {
+    private async replaceExternalWithBackup(staged: string, target: string, backup: string, original: string): Promise<void> {
         const systemRoot = process.env.SystemRoot;
         if (!Platform.isWin || !systemRoot || !this.path.isAbsolute(systemRoot)) throw new Error("Windows 文件安全替换不可用");
         const executable = this.path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-        const script = "$ErrorActionPreference = 'Stop'; [IO.File]::Replace($env:SMARTMD_STAGED, $env:SMARTMD_TARGET, $env:SMARTMD_BACKUP)";
+        // Keep the displaced file if another process can still write to it.
+        // Delete under a handle that denies write access, after comparing raw bytes.
+        const script = [
+            "$ErrorActionPreference = 'Stop'",
+            "[IO.File]::Replace($env:SMARTMD_STAGED, $env:SMARTMD_TARGET, $env:SMARTMD_BACKUP)",
+            "$stream = [IO.File]::Open($env:SMARTMD_BACKUP, 'Open', 'Read', [IO.FileShare]::Read -bor [IO.FileShare]::Delete)",
+            "$sha = [Security.Cryptography.SHA256]::Create()",
+            "try {",
+            "  $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')",
+            "  if ($hash -eq $env:SMARTMD_EXPECTED_HASH) { [IO.File]::Delete($env:SMARTMD_BACKUP) }",
+            "} finally { $sha.Dispose(); $stream.Dispose() }",
+        ].join("\n");
+        const expectedHash = await digest(original);
         const encoded = Buffer.from(script, "utf16le").toString("base64");
         const execFile = (require("child_process") as typeof import("child_process")).execFile;
         await new Promise<void>((resolve, reject) => {
             execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
                 windowsHide: true, timeout: 15000,
-                env: { ...process.env, SMARTMD_STAGED: staged, SMARTMD_TARGET: target, SMARTMD_BACKUP: backup },
+                env: { ...process.env, SMARTMD_STAGED: staged, SMARTMD_TARGET: target, SMARTMD_BACKUP: backup, SMARTMD_EXPECTED_HASH: expectedHash },
             }, error => error ? reject(new Error("Windows 文件替换未确认，已保留可用备份")) : resolve());
         });
     }
@@ -2647,14 +2659,15 @@ export class ExternalSyncService {
                 // visible as either the old complete bytes or the new complete bytes.
                 const rollback = temporary + ".original";
                 try {
-                    await this.replaceExternalWithBackup(temporary, destination, rollback);
-                    const replaced = await this.readExternalMarkdown(rollback);
-                    if (replaced !== original) {
+                    await this.replaceExternalWithBackup(temporary, destination, rollback, original);
+                    if (await this.fs.promises.lstat(rollback).catch((error: NodeJS.ErrnoException) => {
+                        if (error.code === "ENOENT") return null;
+                        throw error;
+                    })) {
+                        const replaced = await this.readExternalMarkdown(rollback);
                         await this.createRecovery(backupContext!.binding, backupContext!.relativePath, replaced, "external");
-                        await this.fs.promises.unlink(rollback);
                         throw new Error("提交时发现外部文件有新修改，新版本已存入恢复区，请核对");
                     }
-                    await this.fs.promises.unlink(rollback);
                 } catch (error) {
                     if (await this.fs.promises.lstat(rollback).catch(() => null)) {
                         throw new Error(localize("外部替换需要核对，原始字节保留在：{0}", rollback));
@@ -2720,9 +2733,25 @@ export class ExternalSyncService {
                 });
             } else {
                 await this.ensureVaultFolder(vaultPath);
+                const adapter = this.app.vault.adapter as { getBasePath?: () => string };
+                const base = adapter.getBasePath?.();
+                if (!base) throw new Error("无法核实Windows物理根");
+                const root = await this.fs.promises.realpath(base);
+                const staged = this.path.resolve(root, stagingPath);
+                const destination = this.path.resolve(root, vaultPath);
+                const parent = this.path.dirname(destination);
+                if (!inside(root, destination, this.path) || !inside(root, staged, this.path) ||
+                    this.pathKey(await this.fs.promises.realpath(staged)) !== this.pathKey(staged) ||
+                    this.pathKey(await this.fs.promises.realpath(parent)) !== this.pathKey(parent)) {
+                    throw new Error("无法核实Windows物理根");
+                }
                 if (!(await validate())) throw new Error("最终复核发现双方再次变化，暂存内容未落地");
                 this.authority.beginFinal(ticket);
-                await this.app.vault.create(vaultPath, content);
+                await this.fs.promises.link(staged, destination);
+                // The desktop Vault may index the exclusive create asynchronously.
+                for (let wait = 0; wait < 40 && !this.app.vault.getAbstractFileByPath(vaultPath); wait++) {
+                    await new Promise(resolve => setTimeout(resolve, 25));
+                }
             }
             const landed = this.app.vault.getAbstractFileByPath(vaultPath);
             if (!(landed instanceof TFile) || await this.app.vault.read(landed) !== content) {
