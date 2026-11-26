@@ -216,9 +216,16 @@ export class SmartMDStore {
                 oneDrive.status = oneDrive.runAllowed ? "ready" : "paused";
             }
             if (!this.loadedInThisProcess && oneDrive.runAllowed) {
-                // A new scan can recreate deletion candidates from the saved
-                // baseline. Never present a previous process's delete preview.
-                oneDrive.pendingDeletions = {};
+                // Preserve automatic transactions for reconciliation only.
+                // New writes always come from the next round's fresh plan.
+                oneDrive.pendingDeletions = Object.fromEntries(Object.entries(oneDrive.pendingDeletions || {})
+                    .filter(([path, record]) => record?.automatic === true &&
+                        record.accountId === accountId && record.vaultId === oneDrive.vaultId &&
+                        record.deviceId === oneDrive.deviceId &&
+                        (record.direction === "cloud" || record.direction === "vault") &&
+                        record.remoteId && oneDrive.fileStates?.[path]?.remoteId === record.remoteId &&
+                        oneDrive.fileStates?.[path]?.remoteEtag === record.remoteEtag &&
+                        !path.includes("\\") && path.split("/").every(part => part && part !== "." && part !== "..")));
             }
             if (!oneDrive.runAllowed) oneDrive.enabled = false;
             if (!keepConnection && oneDrive.firstSyncCompleted && !oneDrive.lastError) {
@@ -995,11 +1002,19 @@ export class MicrosoftAuth {
                 method: options.method || "GET",
                 url: pathOrUrl,
                 requestId,
+                retryAfterMs: graphRetryAfterMs(response.headers?.["retry-after"]),
             });
             throw error;
         }
         return response.json ?? response.arrayBuffer;
     }
+}
+
+export function graphRetryAfterMs(header: string | null | undefined): number {
+    if (!header) return 0;
+    const seconds = Number(header);
+    const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now();
+    return Number.isFinite(delay) ? Math.max(0, delay) : 0;
 }
 
 export class GraphApiError extends Error {
@@ -1008,8 +1023,9 @@ export class GraphApiError extends Error {
     method: string;
     url: string;
     requestId?: string;
+    retryAfterMs?: number;
 
-    constructor(options: { status: number; code?: string; message: string; method?: string; url?: string; requestId?: string }) {
+    constructor(options: { status: number; code?: string; message: string; method?: string; url?: string; requestId?: string; retryAfterMs?: number }) {
         const shortUrl = (options.url || "").replace("https://graph.microsoft.com/v1.0", "");
         const reqDetail = options.requestId ? ` (request-id: ${options.requestId})` : "";
         super(`[Graph API HTTP ${options.status} ${options.code || "Error"}] ${options.method || "GET"} ${shortUrl} -> ${options.message}${reqDetail}`);
@@ -1019,6 +1035,7 @@ export class GraphApiError extends Error {
         this.method = options.method || "GET";
         this.url = options.url || "";
         this.requestId = options.requestId;
+        this.retryAfterMs = options.retryAfterMs;
     }
 }
 

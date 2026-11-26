@@ -152,6 +152,7 @@ export interface SyncFileState {
 export interface OneDriveSyncSettings {
     vaultId: string;
     vaultName: string;
+    deletionRoot?: { accountId: string; vaultId: string; deviceId: string; id: string };
     deviceId: string;
     deviceName: string;
     autoMode: "manual" | "smart" | "custom";
@@ -179,7 +180,7 @@ export interface OneDriveSyncSettings {
     installationProofId?: string;
     /** A deletion request is a preview, never a permission to mutate another side. */
     pendingDeletions?: Record<string, {
-        /** Current-source scoped human review only; missing legacy fields deny approval. */
+        /** Current-source deletion record. Legacy records do not authorize automatic deletion. */
         accountId?: string;
         vaultId?: string;
         deviceId?: string;
@@ -190,6 +191,7 @@ export interface OneDriveSyncSettings {
         localSize?: number;
         localHash?: string;
         requestedAt: number;
+        automatic?: true;
     }>;
     /** Durable local-only UNKNOWN/in-flight upload ledger.
      * Links the mother path to the stage, original operation, local source SHA,

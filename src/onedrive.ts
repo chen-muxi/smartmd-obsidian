@@ -8,7 +8,7 @@ import {
     requestUrl,
     TFile,
 } from "obsidian";
-import { MicrosoftAuth, SmartMDStore } from "./core";
+import { graphRetryAfterMs, MicrosoftAuth, SmartMDStore } from "./core";
 import {
     SMARTKEEP_PUBLISH_URL,
     hasUnfinishedOneDriveSetup,
@@ -508,6 +508,9 @@ export class OneDriveSyncService {
     // A running, already authorized round may finish; no new automatic round may start.
     private autoFollowUpGeneration = 0;
     private followUpTimer = 0;
+    private retryTimer = 0;
+    private retryAt = 0;
+    private retryCount = 0;
     private syncableChangeVersion = 0;
     private activeRoundChangeVersion = 0;
     private observedSharedState = "";
@@ -1261,7 +1264,7 @@ export class OneDriveSyncService {
             );
             if (response.status !== 404) {
                 throw Object.assign(new Error("原暂存Item ID尚未由微软GET确认为不存在，保持历史锁"),
-                    { status: response.status });
+                    { status: response.status, retryAfterMs: graphRetryAfterMs(response.headers.get("retry-after")) });
             }
             stageState = "ABSENT_CONFIRMED_BY_GET";
         }
@@ -1470,7 +1473,7 @@ export class OneDriveSyncService {
             // Even a crash during physical write cannot persist a broad grant.
             const beforeBaseline: Record<string, any> = { ...(s.fileStates || {}) };
             if (chosen.action === "DELETE_CLOUD" || chosen.action === "DELETE_VAULT") {
-                await this.confirmPendingOneDriveDeletions([targetPath], true, operation);
+                await this.applyOneDriveDeletion(targetPath, operation);
                 this.assertCurrent(operation);
                 this.notifyStatusChange();
                 return true;
@@ -1632,51 +1635,25 @@ export class OneDriveSyncService {
                 : "" };
     }
 
-    listPendingOneDriveDeletions(): Array<{
-        path: string; direction: "cloud" | "vault"; reviewKey: string;
-    }> {
-        const pending = (this.settings().pendingDeletions || {}) as Record<string, any>;
-        return Object.entries(pending)
-            .filter(([path, entry]) => (entry?.direction === "cloud" || entry?.direction === "vault")
-                && !this.hasPendingUploadAt(path)
-                && this.pendingDeletionPathInCurrentScope(path, entry.direction))
-            .map(([path, entry]) => ({
-                path,
-                direction: entry.direction,
-                reviewKey: JSON.stringify(entry),
-            }));
-    }
-
-    listAndroidRetainedDeletionPaths(): string[] {
-        if (!Platform.isAndroidApp) return [];
-        const pending = (this.settings().pendingDeletions || {}) as Record<string, { direction: string }>;
-        return Object.entries(pending)
-            .filter(([path, entry]) => entry?.direction === "vault" && !this.isIgnored(path) &&
-                this.app.vault.getAbstractFileByPath(path) instanceof TFile &&
-                !this.pendingDeletionPathInCurrentScope(path, "vault"))
-            .map(([path]) => path);
-    }
-
-    async confirmPendingOneDriveDeletions(
-        paths: string[], approved = false, resumedOperation?: RunTicket,
-        displayedRecords?: ReadonlyMap<string, string>,
+    private async applyOneDriveDeletion(
+        targetPath: string, operation: RunTicket,
+        automaticInventory?: () => Promise<{ rootId: string; files: RemoteFile[] }>,
     ): Promise<void> {
-        if (!approved) throw new Error("缺少本批删除范围的明确人工确认");
-        const resumedApproved = Boolean(resumedOperation && paths?.length === 1
+        const automatic = !!automaticInventory;
+        const resumedApproved = Boolean(!automatic
             && this.resumedProtectedActionAllowed(
-                resumedOperation, paths[0], this.resumedAuthorizedAction || "HOLD",
+                operation, targetPath, this.resumedAuthorizedAction || "HOLD",
             ) && (this.resumedAuthorizedAction === "DELETE_CLOUD"
                 || this.resumedAuthorizedAction === "DELETE_VAULT"));
-        if ((!this.canRun() && !resumedApproved) ||
-            this.running || this.deletionApprovalRunning ||
-            !Array.isArray(paths) || paths.length === 0 || paths.length > 100) {
+        if (!(resumedApproved || (automatic && this.running && this.settings().firstSyncCompleted && this.canRun())) ||
+            this.deletionApprovalRunning) {
             throw new Error("运行未授权、仍在同步中或删除清单不合法");
         }
-        const unique = [...new Set(paths)];
-        if (unique.length !== paths.length) throw new Error("同一个文件不可重复授权删除");
-        if (unique.some(path => this.hasPendingUploadAt(path))) throw new Error("该文件上次上传仍在核对，暂时无法删除。");
+        this.assertCurrent(operation);
+        if (this.hasPendingUploadAt(targetPath)) throw new Error("该文件上次上传仍在核对，暂时无法删除。");
         const settings = this.settings();
         const requireNoDeletionStorm = (allRemote: RemoteFile[]) => {
+            if (automatic) return;
             const skipped = this.skippedLocalPaths();
             const remote = allRemote.filter((item) => {
                 if (this.isIgnored(item.path) || item.size > this.maxBytes()) {
@@ -1708,149 +1685,224 @@ export class OneDriveSyncService {
             }
         };
         const consented = settings.pendingDeletions || {};
-        const pinned = unique.map((path) => {
-            const record = consented[path];
-            const currentAccount = String((this.store as any).settings.local.microsoftAccountId || "");
-            if (!record || (displayedRecords && displayedRecords.get(path) !== JSON.stringify(record)) || !currentAccount ||
-                record.accountId !== currentAccount ||
-                record.vaultId !== settings.vaultId ||
-                record.deviceId !== settings.deviceId ||
-                                typeof path !== "string" || !path ||
-                path.startsWith("/") || path.split("/").some((part) =>
-                    !part || part === "." || part === "..") ||
-                (!resumedApproved && Date.now() - record.requestedAt > 5 * 60 * 1000) ||
-                (resumedApproved && record.direction !==
-                    (this.resumedAuthorizedAction === "DELETE_CLOUD" ? "cloud" : "vault"))) {
-                throw new Error("删除范围、版本或预览时间已失效，请重新检查");
-            }
-            requireCurrentDeletionScope(path, record.direction);
-            return { path, record: JSON.parse(JSON.stringify(record)) };
-        });
+        const path = targetPath;
+        const candidate = consented[path];
+        const currentAccount = String((this.store as any).settings.local.microsoftAccountId || "");
+        if (!candidate || (automatic && candidate.automatic !== true) || !currentAccount ||
+            candidate.accountId !== currentAccount ||
+            candidate.vaultId !== settings.vaultId ||
+            candidate.deviceId !== settings.deviceId ||
+            !path || path.includes("\\") || path.split("/").some(part => !part || part === "." || part === "..") ||
+            (resumedApproved && candidate.direction !==
+                (this.resumedAuthorizedAction === "DELETE_CLOUD" ? "cloud" : "vault"))) {
+            throw new Error("删除范围或版本已失效");
+        }
+        requireCurrentDeletionScope(path, candidate.direction);
+
+        const record = { ...candidate };
         this.deletionApprovalRunning = true;
-        const operation = resumedApproved && resumedOperation
-            ? resumedOperation : this.authority.start(settings, this.contextKey());
         try {
-            for (const { path, record } of pinned) {
-                this.assertCurrent(operation);
-                requireCurrentDeletionScope(path, record.direction);
-                const current = settings.pendingDeletions?.[path];
-                if (!current || JSON.stringify(current) !== JSON.stringify(record)) {
-                    throw new Error("删除确认的目标版本已变化，拒绝旧许可");
+            this.assertCurrent(operation);
+            requireCurrentDeletionScope(path, record.direction);
+            const current = settings.pendingDeletions?.[path];
+            if (!current || JSON.stringify(current) !== JSON.stringify(record)) {
+                throw new Error("删除确认的目标版本已变化，拒绝旧许可");
+            }
+            const verifiedInventory = await automaticInventory?.();
+            const allRemote = verifiedInventory?.files ?? await this.remoteFiles(true, true);
+            if (automatic) await this.store.save();
+            this.assertCurrent(operation);
+            requireCurrentDeletionScope(path, record.direction);
+            requireNoDeletionStorm(allRemote);
+            const remote = allRemote.find((item) => item.path === path);
+            const local = this.localFiles().find((item) => item.path === path);
+            const old = settings.fileStates?.[path];
+            if (!old) throw new Error("原始双端基线已消失，拒绝删除");
+            if (record.direction === "cloud") {
+                if (local || !remote || !remote.id || !remote.etag ||
+                    !Number.isFinite(remote.size) || remote.size > this.maxBytes() ||
+                    remote.id !== record.remoteId ||
+                    remote.etag !== record.remoteEtag ||
+                    old.remoteId !== record.remoteId || old.remoteEtag !== record.remoteEtag ||
+                    await this.app.vault.adapter.exists(path)) {
+                    throw new Error("云端文件版本或本地删除状态发生变化，拒绝危险操作");
                 }
-                const allRemote = await this.remoteFiles(true);
+                if (!automatic) await this.createRecoveryFromRemote(operation, path, remote);
+                const newest = await this.readRemoteFileMetadata(path);
+                if (verifiedInventory && await this.readDeletionRoot(operation) !== verifiedInventory.rootId) {
+                    throw new Error(localize("OneDrive 同步目录已变化，已暂缓删除。"));
+                }
+                const afterBackupRemote = automatic ? allRemote : await this.remoteFiles(true, true);
                 this.assertCurrent(operation);
                 requireCurrentDeletionScope(path, record.direction);
-                requireNoDeletionStorm(allRemote);
-                const remote = allRemote.find((item) => item.path === path);
-                const local = this.localFiles().find((item) => item.path === path);
-                const old = settings.fileStates?.[path];
-                if (!old) throw new Error("原始双端基线已消失，拒绝删除");
-                if (record.direction === "cloud") {
-                    if (local || !remote || !remote.id || !remote.etag ||
-                        !Number.isFinite(remote.size) || remote.size > this.maxBytes() ||
-                        remote.id !== record.remoteId ||
-                        remote.etag !== record.remoteEtag ||
-                        old.remoteEtag !== record.remoteEtag) {
-                        throw new Error("云端文件版本或本地删除状态发生变化，拒绝危险操作");
-                    }
-                    await this.createRecoveryFromRemote(operation, path, remote);
-                    const newest = await this.readRemoteFileMetadata(path);
-                    const afterBackupRemote = await this.remoteFiles(true);
+                requireNoDeletionStorm(afterBackupRemote);
+                if (JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
+                    throw new Error("冷备期间删除候选已变化，拒绝旧许可");
+                }
+                if (!newest || newest.id !== remote.id || newest.etag !== remote.etag ||
+                    (Number.isFinite(newest.size) && newest.size > this.maxBytes()) ||
+                    !afterBackupRemote.some((item) => item.path === path &&
+                        item.id === remote.id && item.etag === remote.etag) ||
+                    await this.app.vault.adapter.exists(path)) {
+                    throw new Error("云端原稿在冷备后变更或已超出当前范围，禁止删除");
+                }
+                this.authority.beginFinal(operation);
+                // The token and optional 401-refresh await occur inside
+                // fetchGraph. A final pre-send guard must execute AFTER
+                // each token resolves, before each physical DELETE fetch.
+                const verifyBeforeDeleteDispatch = () => {
                     this.assertCurrent(operation);
                     requireCurrentDeletionScope(path, record.direction);
                     requireNoDeletionStorm(afterBackupRemote);
-                    if (JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
-                        throw new Error("冷备期间删除候选已变化，拒绝旧许可");
+                    if (JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record) ||
+                        settings.fileStates?.[path]?.remoteId !== remote.id ||
+                        settings.fileStates?.[path]?.remoteEtag !== remote.etag) {
+                        throw new Error("取得凭据期间删除候选或原版本已变化，禁止发出云端删除");
                     }
-                    if (!newest || newest.id !== remote.id || newest.etag !== remote.etag ||
-                        (Number.isFinite(newest.size) && newest.size > this.maxBytes()) ||
-                        !afterBackupRemote.some((item) => item.path === path &&
-                            item.id === remote.id && item.etag === remote.etag)) {
-                        throw new Error("云端原稿在冷备后变更或已超出当前范围，禁止删除");
-                    }
-                    this.authority.beginFinal(operation);
-                    // The token and optional 401-refresh await occur inside
-                    // fetchGraph. A final pre-send guard must execute AFTER
-                    // each token resolves, before each physical DELETE fetch.
-                    const verifyBeforeDeleteDispatch = () => {
-                        this.assertCurrent(operation);
-                        requireCurrentDeletionScope(path, record.direction);
-                        requireNoDeletionStorm(afterBackupRemote);
-                        if (JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record) ||
-                            settings.fileStates?.[path]?.remoteId !== remote.id ||
-                            settings.fileStates?.[path]?.remoteEtag !== remote.etag) {
-                            throw new Error("取得凭据期间删除候选或原版本已变化，禁止发出云端删除");
+                };
+                try {
+                    await this.deleteRemote(remote, operation, verifyBeforeDeleteDispatch, async () => {
+                        if (await this.app.vault.adapter.exists(path)) {
+                            throw new Error("本地文件已恢复，取消删除");
                         }
-                    };
-                    await this.deleteRemote(remote, operation, verifyBeforeDeleteDispatch);
-                } else if (record.direction === "vault") {
-                    if (remote || !local ||
-                        local.mtime !== record.localMtime ||
-                        local.size !== record.localSize) {
-                        throw new Error("知识库原稿已变化或云端版本重新出现，拒绝删除");
+                    });
+                } catch (error: any) {
+                    if (automatic && (this.isTemporarySyncFailure(error) || [404, 412].includes(Number(error?.status)))) {
+                        error.recheckDeletion = true;
                     }
-                    const approvedBytes = await this.app.vault.readBinary(local.file);
-                    if (await this.sha256Bytes(approvedBytes) !== record.localHash) {
-                        throw new Error("知识库原稿已变化，拒绝删除");
-                    }
-                    if (this.deleteGuard && await this.deleteGuard(path)) {
-                        throw new Error("文件受外部文件夹同步保护，本次 OneDrive 删除许可不得跨域生效");
-                    }
-                    const finalRemote = await this.remoteFiles(true);
-                    this.assertCurrent(operation);
-                    requireCurrentDeletionScope(path, record.direction);
-                    requireNoDeletionStorm(finalRemote);
-                    const reappeared = finalRemote.find((item) => item.path === path);
-                    if (reappeared || (this.deleteGuard && await this.deleteGuard(path))) {
-                        throw new Error("删除前云端原稿或跨模块保护发生变化，禁止本地删除");
-                    }
-                    this.assertCurrent(operation);
-                    requireCurrentDeletionScope(path, record.direction);
-                    requireNoDeletionStorm(finalRemote);
-                    const currentLocal = this.app.vault.getAbstractFileByPath(path);
-                    if (!(currentLocal instanceof TFile) || currentLocal !== local.file ||
-                        local.file.stat.mtime !== record.localMtime ||
-                        local.file.stat.size !== record.localSize ||
-                        JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
-                        throw new Error("删除前本机文件、版本或删除候选变化，旧确认失效");
-                    }
-                    if (!Platform.isAndroidApp && typeof this.app.vault.trash !== "function") {
-                        throw new Error("Obsidian原生回收站不可用，不执行危险删除");
-                    }
-                    // Full-list and cross-module checks can yield after the
-                    // first content read. Re-read actual bytes after those
-                    // awaits, including same-mtime/same-size local edits.
-                    const finalBytes = await this.app.vault.readBinary(currentLocal);
-                    const finalHash = await this.sha256Bytes(finalBytes);
-                    this.assertCurrent(operation);
-                    requireCurrentDeletionScope(path, record.direction);
-                    requireNoDeletionStorm(finalRemote);
-                    if (finalHash !== record.localHash ||
-                        this.app.vault.getAbstractFileByPath(path) !== currentLocal ||
-                        currentLocal.stat.mtime !== record.localMtime ||
-                        currentLocal.stat.size !== record.localSize ||
-                        JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
-                        throw new Error("最终清单核对后本机正文或删除候选已变化，保留原文");
-                    }
-                    this.authority.beginFinal(operation);
-                    if (Platform.isAndroidApp) await this.app.vault.delete(currentLocal);
-                    else await this.app.vault.trash(currentLocal, true);
-                    if (await this.app.vault.adapter.exists(path)) throw new Error("本地原路径仍然存在，未完成同步删除");
-                } else {
-                    throw new Error("未知删除方向");
+                    throw error;
+                } finally {
+                    this.clearRemoteDeltaCache();
                 }
-                delete settings.fileStates[path];
-                delete settings.pendingDeletions[path];
+            } else if (record.direction === "vault") {
+                if (remote || !local ||
+                    local.mtime !== record.localMtime ||
+                    local.size !== record.localSize) {
+                    throw new Error("知识库原稿已变化或云端版本重新出现，拒绝删除");
+                }
+                if (verifiedInventory && (old.remoteId !== record.remoteId || old.localHash !== record.localHash)) {
+                    throw new Error(localize("OneDrive 尚未确认此文件已删除。"));
+                }
+                const approvedBytes = await this.app.vault.readBinary(local.file);
+                if (await this.sha256Bytes(approvedBytes) !== record.localHash) {
+                    throw new Error("知识库原稿已变化，拒绝删除");
+                }
+                if (this.deleteGuard && await this.deleteGuard(path)) {
+                    throw new Error("文件受外部文件夹同步保护，本次 OneDrive 删除许可不得跨域生效");
+                }
+                const finalRemote = automatic ? allRemote : await this.remoteFiles(true, true);
+                this.assertCurrent(operation);
+                requireCurrentDeletionScope(path, record.direction);
+                requireNoDeletionStorm(finalRemote);
+                const reappeared = finalRemote.find((item) => item.path === path);
+                if (reappeared || (this.deleteGuard && await this.deleteGuard(path)) ||
+                    (verifiedInventory && !await this.confirmRemoteDeletion(operation, path, old.remoteId, verifiedInventory.rootId))) {
+                    throw new Error("删除前云端原稿或跨模块保护发生变化，禁止本地删除");
+                }
+                this.assertCurrent(operation);
+                requireCurrentDeletionScope(path, record.direction);
+                requireNoDeletionStorm(finalRemote);
+                const currentLocal = this.app.vault.getAbstractFileByPath(path);
+                if (!(currentLocal instanceof TFile) || currentLocal !== local.file ||
+                    local.file.stat.mtime !== record.localMtime ||
+                    local.file.stat.size !== record.localSize ||
+                    JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
+                    throw new Error("删除前本机文件、版本或删除候选变化，旧确认失效");
+                }
+                if (!Platform.isAndroidApp && typeof this.app.vault.trash !== "function") {
+                    throw new Error("Obsidian原生回收站不可用，不执行危险删除");
+                }
+                // Full-list and cross-module checks can yield after the
+                // first content read. Re-read actual bytes after those
+                // awaits, including same-mtime/same-size local edits.
+                const finalBytes = await this.app.vault.readBinary(currentLocal);
+                const finalHash = await this.sha256Bytes(finalBytes);
+                this.assertCurrent(operation);
+                requireCurrentDeletionScope(path, record.direction);
+                requireNoDeletionStorm(finalRemote);
+                if (finalHash !== record.localHash ||
+                    this.app.vault.getAbstractFileByPath(path) !== currentLocal ||
+                    currentLocal.stat.mtime !== record.localMtime ||
+                    currentLocal.stat.size !== record.localSize ||
+                    JSON.stringify(settings.pendingDeletions?.[path]) !== JSON.stringify(record)) {
+                    throw new Error("最终清单核对后本机正文或删除候选已变化，保留原文");
+                }
+                this.authority.beginFinal(operation);
+                if (Platform.isAndroidApp) await this.app.vault.delete(currentLocal);
+                else await this.app.vault.trash(currentLocal, true);
+                if (await this.app.vault.adapter.exists(path)) throw new Error("本地原路径仍然存在，未完成同步删除");
+            } else {
+                throw new Error("未知删除方向");
+            }
+            if (!automatic) {
                 settings.status = "paused";
                 settings.lastError = "本批确认的删除已执行，需再同步核对剩余文件";
-                await (this.store as any).save();
             }
+            await this.finishOneDriveDeletion(path);
         } catch (error: any) {
             if (error?.isDeletionFrozen) await (this.store as any).save();
             throw error;
         } finally {
-            if (!resumedApproved) this.authority.finishFinal(operation);
             this.deletionApprovalRunning = false;
+        }
+    }
+
+    private async finishOneDriveDeletion(path: string): Promise<void> {
+        const settings = this.settings();
+        const previous = settings.fileStates[path];
+        const records = settings.pendingDeletions!;
+        const record = records[path];
+        delete settings.fileStates[path];
+        delete records[path];
+        try {
+            await this.store.save();
+        } catch (error) {
+            if (this.settings() === settings && settings.pendingDeletions === records) {
+                if (previous) settings.fileStates[path] ??= previous;
+                if (record) records[path] ??= record;
+            }
+            throw error;
+        }
+    }
+
+    private async readDeletionRoot(operation: RunTicket): Promise<string> {
+        return this.readSyncRoot(this.settings().vaultId, () => this.assertCurrent(operation));
+    }
+
+    private async readSyncRoot(vaultId: string, assertScope: () => void): Promise<string> {
+        const path = encodePath(`vaults/${vaultId}/files`);
+        const root = await this.graph("GET", `/drive/special/approot:/${path}`, undefined, undefined, assertScope);
+        if (!root?.id || !root.folder) throw new Error(localize("OneDrive 同步目录已变化，已暂缓删除。"));
+        return String(root.id);
+    }
+
+    private async verifyFirstSyncRoot(
+        vaultId: string, baselines: Record<string, SyncFileState>, assertScope: () => void,
+    ): Promise<string | undefined> {
+        assertScope();
+        if (!Object.values(baselines).some(file => file.remoteId)) return undefined;
+        const rootId = await this.readSyncRoot(vaultId, assertScope);
+        const files = await this.remoteFiles(true, true, { vaultId }, rootId);
+        if (!files.some(file => baselines[file.path]?.remoteId === file.id) ||
+            await this.readSyncRoot(vaultId, assertScope) !== rootId) {
+            throw new Error(localize("OneDrive 同步目录已变化，已暂缓删除。"));
+        }
+        return rootId;
+    }
+
+    private async confirmRemoteDeletion(operation: RunTicket, path: string, previousId: string, rootId: string): Promise<boolean> {
+        if (!previousId) return false;
+        const guard = () => this.assertCurrent(operation);
+        if (await this.readDeletionRoot(operation) !== rootId) return false;
+        try {
+            await this.graph("GET",
+                "/drive/items/" + encodeURIComponent(previousId) + "?$select=id,name,eTag,size,fileSystemInfo",
+                undefined, undefined, guard);
+            return false;
+        } catch (error: any) {
+            guard();
+            if (error?.status !== 404) throw error;
+            return !await this.readRemoteFileMetadata(path);
         }
     }
 
@@ -2414,6 +2466,9 @@ export class OneDriveSyncService {
         if (this.preparing) return this.firstConnectionProgress || (Platform.isAndroidApp
             ? "正在查找 OneDrive 知识库…" : "正在连接 OneDrive 并检查同步范围");
         if (this.firstConnectionError) return this.firstConnectionError;
+        if (this.retryAt > Date.now() && settings.enabled && this.canRun()) {
+            return localize("OneDrive 暂时连不上，将在 {0} 自动重试。", new Date(this.retryAt).toLocaleTimeString());
+        }
         if (settings.status === "partial_success") return localizeMessage(settings.lastError) || localize("部分同步完成（存在未同步文件）");
         if (settings.status === "failed") return localize("同步失败：{0}", localizeMessage(settings.lastError) || localize("未知原因"));
         if (settings.status === "paused") return settings.lastError ? localize("同步未完成：{0}", localizeMessage(settings.lastError)) : "已暂停";
@@ -2898,8 +2953,38 @@ export class OneDriveSyncService {
         // Scheduled, save and follow-up triggers must not run after the user
         // switches back to manual, even if a timer was already queued.
         if (!this.canRun() || !s.enabled || s.autoMode === "manual" ||
-            !s.firstSyncCompleted) return false;
+            !s.firstSyncCompleted || Date.now() < this.retryAt) return false;
         return await this.runUnifiedOperation(() => this.sync(false, null, null, true));
+    }
+
+    private isTemporarySyncFailure(error: any): boolean {
+        return [408, 429, 500, 502, 503, 504].includes(Number(error?.status)) ||
+            /\b(?:ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_CONNECTION_(?:RESET|CLOSED|REFUSED)|ERR_(?:NAME_NOT_RESOLVED|TIMED_OUT)|ETIMEDOUT|ECONNRESET|Failed to fetch)\b/i
+                .test(String(error?.cause?.message || error?.message || error));
+    }
+
+    private scheduleBackgroundRetry(retryAfterMs = 0): void {
+        const settings = this.settings();
+        if (!settings.enabled || settings.autoMode === "manual" || !settings.firstSyncCompleted || !this.canRun()) return;
+        const generation = this.autoFollowUpGeneration;
+        const scope = this.contextKey();
+        window.clearTimeout(this.retryTimer);
+        const backoff = Math.min(15_000 * 2 ** this.retryCount, 300_000);
+        const delay = Math.min(Math.max(backoff, retryAfterMs), 2_147_483_647);
+        this.retryCount = Math.min(this.retryCount + 1, 5);
+        this.retryAt = Date.now() + delay;
+        this.retryTimer = window.setTimeout(() => {
+            this.retryAt = 0;
+            if (generation !== this.autoFollowUpGeneration || settings !== this.settings() ||
+                scope !== this.contextKey()) return;
+            void this.requestSync().catch(console.error);
+        }, delay);
+    }
+
+    private clearBackgroundRetry(): void {
+        window.clearTimeout(this.retryTimer);
+        this.retryAt = 0;
+        this.retryCount = 0;
     }
 
     private sharedStateFingerprint(): string {
@@ -2966,7 +3051,7 @@ export class OneDriveSyncService {
             const s = this.settings();
             return generation === this.autoFollowUpGeneration
                 && s.enabled && s.autoMode !== "manual"
-                && s.firstSyncCompleted && this.canRun();
+                && s.firstSyncCompleted && Date.now() >= this.retryAt && this.canRun();
         };
         if (this.operationJob) {
             if (canStartAutomaticFollowUp(this.autoFollowUpGeneration)
@@ -3024,6 +3109,7 @@ export class OneDriveSyncService {
         this.resumedApprovalGeneration++;
         this.autoFollowUpGeneration++;
         this.followUpQueued = false;
+        this.clearBackgroundRetry();
         this.resumedReviewTickets = new WeakMap();
         this.pendingSharedImport = null;
         settings.status = "stopping";
@@ -3044,6 +3130,7 @@ export class OneDriveSyncService {
         // hasUnappliedSyncChange() still awaiting a byte check.
         this.autoFollowUpGeneration++;
         this.followUpQueued = false;
+        this.clearBackgroundRetry();
         // Switching from smart/custom to manual is NOT a global revoke.
         // Keep this session's newly approved manual permission, but cancel
         // queued automatic timers and disable every automatic trigger.
@@ -3082,6 +3169,7 @@ export class OneDriveSyncService {
     dispose(): void {
         this.resumedApprovalGeneration++;
         this.resumedReviewTickets = new WeakMap();
+        this.clearBackgroundRetry();
         if (this.resumedTransientState) this.resumedTransientState.runAllowed = false;
         void this.authority.shutdown();
         if (typeof window !== "undefined") window.clearTimeout(this.saveTimer);
@@ -3134,13 +3222,38 @@ export class OneDriveSyncService {
         settings.lastError = "";
         settings.pendingDeletions = settings.pendingDeletions || {};
         for (const pattern of settings.ignorePatterns || []) ignoreMatcher(pattern);
-        await (this.store as any).save();
         let currentProcessingPath = "";
+        let temporaryFileFailure = false;
         try {
+            const rootScope = {
+                accountId: settings.confirmationAccountId || "",
+                vaultId: settings.vaultId,
+                deviceId: settings.deviceId,
+            };
+            const storedRoot = settings.deletionRoot;
+            const storedRootMatches = storedRoot?.accountId === rootScope.accountId &&
+                storedRoot.vaultId === rootScope.vaultId && storedRoot.deviceId === rootScope.deviceId;
+            let knownDeletionRoot = storedRootMatches ? storedRoot.id : "";
+            await (this.store as any).save();
             reportProgress?.(localize("正在读取本地与云端状态…"));
             const local = prepared?.local || this.localFiles();
-            let previous = settings.fileStates || {};
-            let allRemote = prepared?.allRemote || await this.remoteFiles();
+            let previous: Record<string, SyncFileState> = settings.fileStates || {};
+            let allRemote: RemoteFile[];
+            if (!firstSync && !knownDeletionRoot && Object.values(previous).some(file => file.remoteId)) {
+                // Migrate an existing binding using its file identities, never
+                // a mutable listing cache or new files imported on a later run.
+                const rootId = await this.readDeletionRoot(operation);
+                allRemote = await this.remoteFiles(true, true, undefined, rootId);
+                if (!allRemote.some(file => previous[file.path]?.remoteId === file.id) ||
+                    await this.readDeletionRoot(operation) !== rootId) {
+                    throw new Error(localize("OneDrive 同步目录已变化，已暂缓删除。"));
+                }
+                knownDeletionRoot = rootId;
+                settings.deletionRoot = { ...rootScope, id: rootId };
+                await this.store.save();
+            } else {
+                allRemote = prepared?.allRemote || await this.remoteFiles();
+            }
             if (!firstSync && !prepared && !allRemote.length &&
                 Object.values(previous).some(item => Boolean((item as SyncFileState)?.remoteId))) {
                 // Confirm an empty delta against a full listing of the bound
@@ -3148,7 +3261,9 @@ export class OneDriveSyncService {
                 allRemote = await this.remoteFiles(true, true);
             }
             if (!firstSync && Object.keys(settings.pendingUploadOperations || {}).length) {
-                if (await this.recoverVerifiedUploads(operation)) {
+                const recovery = await this.recoverVerifiedUploads(operation);
+                temporaryFileFailure = recovery.retryNeeded;
+                if (recovery.refreshed) {
                     allRemote = await this.remoteFiles(true, true);
                     previous = settings.fileStates || {};
                 }
@@ -3170,10 +3285,6 @@ export class OneDriveSyncService {
                 Object.entries(previous).filter(([path]) =>
                     skippedPaths.has(path) || this.isIgnored(path)),
             );
-
-            const stormReason = firstSync ? "" : this.deletionStormState(
-                local, remote, previous, skippedPaths,
-            ).reason;
 
             const firstSyncMatches = new Map<string, boolean>();
             if (firstSync && !prepared?.androidMerge) {
@@ -3246,12 +3357,25 @@ export class OneDriveSyncService {
             }
 
             let processingIndex = 0;
-            let deletionPaused = 0;
             let successCount = 0;
             let unchangedCount = 0;
             let pendingUploadCount = 0;
             const startTime = Date.now();
             const failedDiagnostics: SyncFailureDiagnostic[] = [];
+            let deletionInventory: Promise<{ rootId: string; files: RemoteFile[] }> | undefined;
+            const loadDeletionInventory = () => deletionInventory ??= (async () => {
+                const rootId = await this.readDeletionRoot(operation);
+                if (knownDeletionRoot && rootId !== knownDeletionRoot) {
+                    throw new Error(localize("OneDrive 同步目录已变化，已暂缓删除。"));
+                }
+                const files = await this.remoteFiles(true, true, undefined, rootId);
+                if (await this.readDeletionRoot(operation) !== rootId ||
+                    (!knownDeletionRoot && !files.some(file => previous[file.path]?.remoteId === file.id))) {
+                    throw new Error(localize("OneDrive 同步目录已变化，已暂缓删除。"));
+                }
+                settings.deletionRoot = { ...rootScope, id: rootId };
+                return { rootId, files };
+            })();
 
             let lastFlushTime = Date.now();
             let itemsSinceLastFlush = 0;
@@ -3282,14 +3406,20 @@ export class OneDriveSyncService {
                     pendingUploadCount++;
                     continue;
                 }
-                if (Boolean(localItem) === Boolean(remoteItem)) delete settings.pendingDeletions[path];
-                if (!localItem && !remoteItem) {
-                    // Keep the last known version if the path reappears.
-                    if (old) next[path] = old;
-                    continue;
-                }
+                if (localItem && remoteItem) delete settings.pendingDeletions[path];
 
                 try {
+                    if (!localItem && !remoteItem) {
+                        const interrupted = settings.pendingDeletions[path];
+                        if (!firstSync && interrupted?.automatic && old?.remoteId === interrupted.remoteId &&
+                            interrupted.accountId === settings.confirmationAccountId && interrupted.vaultId === settings.vaultId &&
+                            interrupted.deviceId === settings.deviceId && !await this.app.vault.adapter.exists(path) &&
+                            await this.confirmRemoteDeletion(operation, path, old.remoteId, (await loadDeletionInventory()).rootId)) {
+                            await this.finishOneDriveDeletion(path);
+                            successCount++;
+                        } else if (old) next[path] = old;
+                        continue;
+                    }
                     let attempts = 0;
                     let lastAttemptError: any = null;
                     while (attempts < 2) {
@@ -3467,20 +3597,26 @@ export class OneDriveSyncService {
 
                             if (localItem && !remoteItem) {
                                 if (!firstSync && old?.remoteId) {
-                                    settings.pendingDeletions[path] = {
-                                        accountId: String((this.store as any).settings.local.microsoftAccountId || ""),
-                                        vaultId: settings.vaultId, deviceId: settings.deviceId,
-                                        direction: "vault", remoteId: old.remoteId,
-                                        remoteEtag: old.remoteEtag,
-                                        localMtime: localItem.mtime, localSize: localItem.size,
-                                        localHash: await this.sha256Bytes(
-                                            await this.app.vault.readBinary(localItem.file)),
-                                        requestedAt: Date.now(),
-                                    };
-                                    next[path] = old;
-                                    deletionPaused++;
-                                    lastAttemptError = null;
-                                    break;
+                                    if (!old.localHash || !await this.confirmRemoteDeletion(
+                                        operation, path, old.remoteId, (await loadDeletionInventory()).rootId)) {
+                                        throw new Error(localize("OneDrive 尚未确认此文件已删除。"));
+                                    }
+                                    const localHash = await this.sha256Bytes(await this.app.vault.readBinary(localItem.file));
+                                    if (localHash === old.localHash) {
+                                        settings.pendingDeletions[path] = {
+                                            accountId: settings.confirmationAccountId,
+                                            vaultId: settings.vaultId, deviceId: settings.deviceId,
+                                            direction: "vault", remoteId: old.remoteId, remoteEtag: old.remoteEtag,
+                                            localMtime: localItem.mtime, localSize: localItem.size,
+                                            localHash, requestedAt: Date.now(), automatic: true,
+                                        };
+                                        await this.applyOneDriveDeletion(path, operation, loadDeletionInventory);
+                                        successCount++;
+                                        lastAttemptError = null;
+                                        break;
+                                    }
+                                    // An edit made on this device supersedes the deletion.
+                                    delete settings.pendingDeletions[path];
                                 }
                                 const readMtime = localItem.mtime;
                                 const data = await this.app.vault.readBinary(localItem.file);
@@ -3508,19 +3644,23 @@ export class OneDriveSyncService {
                             }
 
                             if (!localItem && remoteItem) {
-                                if (!firstSync && old?.localMtime) {
+                                if (!firstSync && old?.localMtime && old.remoteId &&
+                                    old.remoteId === remoteItem.id && old.remoteEtag && old.remoteEtag === remoteItem.etag) {
                                     settings.pendingDeletions[path] = {
-                                        accountId: String((this.store as any).settings.local.microsoftAccountId || ""),
+                                        accountId: settings.confirmationAccountId,
                                         vaultId: settings.vaultId, deviceId: settings.deviceId,
                                         direction: "cloud", remoteId: remoteItem.id,
                                         remoteEtag: remoteItem.etag,
                                         requestedAt: Date.now(),
+                                        automatic: true,
                                     };
-                                    next[path] = old;
-                                    deletionPaused++;
+                                    await this.applyOneDriveDeletion(path, operation, loadDeletionInventory);
+                                    successCount++;
                                     lastAttemptError = null;
                                     break;
                                 }
+                                // A changed cloud version takes precedence over local absence.
+                                delete settings.pendingDeletions[path];
                                 const firstAndroidReceive = firstSync && Platform.isAndroidApp;
                                 const localHash = await this.download(operation, remoteItem, path, undefined, firstAndroidReceive);
                                 const downloaded = this.app.vault.getAbstractFileByPath(path) as TFile | null;
@@ -3549,7 +3689,7 @@ export class OneDriveSyncService {
                             }
                         } catch (err: any) {
                             lastAttemptError = err;
-                            if (!err?.isUnknownCommit && (err?.status === 429 || err?.status === 503 || String(err?.message || "").includes("429")) && attempts < 2) {
+                            if (!err?.isUnknownCommit && !err?.recheckDeletion && !err?.retryAfterMs && err?.status === 503 && attempts < 2) {
                                 await new Promise((r) => setTimeout(r, 200));
                                 continue;
                             }
@@ -3570,13 +3710,18 @@ export class OneDriveSyncService {
                     // or drive out of quota). Do not try the next session or
                     // treat a second file's success as recovery of the scope.
                     const status = Number(fileError?.status || 0);
+                    if (status === 429 || (fileError?.retryAfterMs && this.isTemporarySyncFailure(fileError))) {
+                        await flushIfNeeded(true);
+                        throw fileError;
+                    }
                     const invalidCloudScope = status === 401 || status === 403 || status === 507 ||
-                        (status === 404 && !fileError?.isMissingFile);
+                        (status === 404 && !fileError?.isMissingFile && !fileError?.recheckDeletion);
                     if (!this.isCurrent(operation) || settings.androidFirstDownload || fileError?.isFatalAuth ||
                         (fileError?.isUnknownCommit && (firstSync || !this.hasPendingUploadAt(path))) || invalidCloudScope) {
                         throw fileError;
                     }
                     const pendingUpload = this.hasPendingUploadAt(path);
+                    temporaryFileFailure ||= Boolean(fileError?.recheckDeletion) || this.isTemporarySyncFailure(fileError);
                     if (pendingUpload) delete settings.pendingDeletions[path];
                     if (old) {
                         next[path] = old;
@@ -3586,7 +3731,9 @@ export class OneDriveSyncService {
                     if (pendingUpload) {
                         skippedPaths.add(path);
                         pendingUploadCount++;
-                    } else failedDiagnostics.push(this.parseFileErrorToDiagnostic(path, fileError, localItem ? "UPLOAD" : "DOWNLOAD"));
+                    } else {
+                        failedDiagnostics.push(this.parseFileErrorToDiagnostic(path, fileError, localItem ? "UPLOAD" : "DOWNLOAD"));
+                    }
                 }
             }
 
@@ -3619,8 +3766,9 @@ export class OneDriveSyncService {
                     settings.lastError = `部分同步完成：${successCount} 项成功，${failedCount} 项失败（已生成排查指引）`;
                     settings.lastSkippedCount = skippedPaths.size;
                     await (this.store as any).save();
+                    if (temporaryFileFailure && !firstSync) this.scheduleBackgroundRetry();
                     this.statusCallback?.(`SmartMD: 部分同步 (${failedCount} 失败)`);
-                    new Notice(localize("OneDrive 同步部分完成：{0} 成功，{1} 失败。可在设置查看详情。", successCount, failedCount), 8000);
+                    if (!silentSuccess || !this.retryAt) new Notice(localize("OneDrive 同步部分完成：{0} 成功，{1} 失败。可在设置查看详情。", successCount, failedCount), 8000);
                     return false;
                 } else {
                     settings.fileStates = this.mergePendingUploadBaselines(next);
@@ -3628,31 +3776,20 @@ export class OneDriveSyncService {
                     settings.lastError = `同步失败：全部 ${failedCount} 项传输均未成功。`;
                     settings.lastSkippedCount = skippedPaths.size;
                     await (this.store as any).save();
+                    if (temporaryFileFailure && !firstSync) this.scheduleBackgroundRetry();
                     this.statusCallback?.("SmartMD: 同步失败");
-                    new Notice(localize("OneDrive 同步失败：{0}", localizeMessage(settings.lastError)), 8000);
+                    if (!silentSuccess || !this.retryAt) new Notice(localize("OneDrive 同步失败：{0}", localizeMessage(settings.lastError)), 8000);
                     return false;
                 }
             }
 
-            if (deletionPaused) {
-                settings.fileStates = this.mergePendingUploadBaselines(next);
-                settings.status = "paused";
-                const unresolvedReasons = [
-                    deletionPaused ? (stormReason || (this.listAndroidRetainedDeletionPaths().length
-                        ? "云端缺失但安卓有未同步或未经校验的版本，已保留本机笔记以供核对。"
-                        : "") ||
-                        `${deletionPaused} 项内容尚未完成两端对账，已暂停同步且未执行删除。`) : "",
-                ].filter(Boolean);
-                settings.lastError = unresolvedReasons.join("；");
-                settings.lastSkippedCount = skippedPaths.size;
-                await (this.store as any).save();
-                this.statusCallback?.("SmartMD: 同步存在未决项");
-                new Notice(localize("OneDrive 同步未完成：{0}", localizeMessage(settings.lastError)), 8000);
-                return false;
-            }
             const wasFirstCompleted = settings.firstSyncCompleted === true;
             const lastConfirmedSuccessAt = settings.lastSuccessAt;
             const firstMerge = settings.androidFirstMerge;
+            const previousMode = {
+                autoMode: settings.autoMode, enabled: settings.enabled, onStartup: settings.onStartup,
+                afterSave: settings.afterSave, intervalMinutes: settings.intervalMinutes,
+            };
             settings.fileStates = this.mergePendingUploadBaselines(next);
             settings.lastSkippedCount = skippedPaths.size;
             settings.failedDiagnostics = [];
@@ -3668,6 +3805,12 @@ export class OneDriveSyncService {
                 await this.purgeExpiredRecovery();
                 this.assertCurrent(operation);
                 await (this.store as any).save();
+                if (firstSync && !wasFirstCompleted) {
+                    const rootId = await this.verifyFirstSyncRoot(settings.vaultId, next, () => this.assertCurrent(operation));
+                    this.assertCurrent(operation);
+                    settings.deletionRoot = rootId ? { ...rootScope, id: rootId } : undefined;
+                    Object.assign(settings, this.newBindingSyncMode());
+                }
                 settings.firstSyncCompleted = true;
                 delete settings.androidFirstMerge;
                 settings.status = "ready";
@@ -3675,14 +3818,21 @@ export class OneDriveSyncService {
                 settings.lastError = "";
                 summary.outcome = "complete";
                 reportProgress?.(localize("正在保存同步结果…"));
-                await (this.store as any).save();
+                if (firstSync) await this.store.saveWithIdentityGuard(() => this.assertCurrent(operation));
+                else await this.store.save();
             } catch (error) {
                 summary.outcome = "incomplete";
                 settings.firstSyncCompleted = wasFirstCompleted;
+                if (firstSync && !wasFirstCompleted) {
+                    settings.deletionRoot = storedRoot;
+                    Object.assign(settings, previousMode);
+                }
                 if (firstMerge) settings.androidFirstMerge = firstMerge;
                 settings.lastSuccessAt = lastConfirmedSuccessAt;
                 throw error;
             }
+            if (temporaryFileFailure && !firstSync) this.scheduleBackgroundRetry();
+            else this.clearBackgroundRetry();
             this.statusCallback?.(pendingUploads ? "SmartMD: 有文件待核对" : "SmartMD: 已同步");
             if (!reportProgress && !silentSuccess) {
                 const otherSkipped = skippedPaths.size - pendingUploadCount;
@@ -3695,14 +3845,18 @@ export class OneDriveSyncService {
 
         } catch (error: any) {
             if (!this.isCurrent(operation)) return false;
-            if (error?.isUnknownCommit) {
+            const scopedUpload = !firstSync && currentProcessingPath && this.hasPendingUploadAt(currentProcessingPath);
+            if (error?.isUnknownCommit && !scopedUpload) {
                 // A stage cleanup or final PUT has an unresolved outcome.
                 // Even when the trusted mother baseline is already durable,
                 // do not carry the round's old broad permission forward.
                 settings.runAllowed = false;
                 settings.enabled = false;
             }
-            await this.fail(error, currentProcessingPath);
+            if (!firstSync && (!error?.isUnknownCommit || scopedUpload) && this.isTemporarySyncFailure(error)) {
+                this.scheduleBackgroundRetry(Number(error?.retryAfterMs) || 0);
+            }
+            await this.fail(error, currentProcessingPath, silentSuccess && Boolean(this.retryAt));
             return false;
         } finally {
             if (firstSync) {
@@ -3779,16 +3933,17 @@ export class OneDriveSyncService {
         });
     }
 
-    private async recoverVerifiedUploads(operation: RunTicket): Promise<boolean> {
+    private async recoverVerifiedUploads(operation: RunTicket): Promise<{ refreshed: boolean; retryNeeded: boolean }> {
         const settings = this.settings();
         const ledger = this.uploadLedger();
         let refreshed = false;
+        let retryNeeded = false;
         for (const [path, record] of Object.entries(ledger)) {
             if (!record ||
                 record.motherPath !== path || record.direction !== "upload" ||
                 record.accountId !== settings.confirmationAccountId || record.vaultId !== settings.vaultId ||
                 record.deviceId !== settings.deviceId || typeof record.operationId !== "string" ||
-                !record.operationId || !record.stageId || !record.stageEtag ||
+                !record.operationId ||
                 !/^[a-f0-9]{64}$/.test(record.sourceSha256 || "") ||
                 !Number.isFinite(record.sourceMtime) || record.sourceMtime <= 0 ||
                 !Number.isSafeInteger(record.sourceBytes) || record.sourceBytes < 0 || record.sourceBytes > this.maxBytes() ||
@@ -3804,6 +3959,31 @@ export class OneDriveSyncService {
                     rules !== JSON.stringify([settings.ignorePatterns, this.maxBytes()])) throw new Error("上传记录或同步范围已变化");
             };
             try {
+                if (["STAGE_SESSION_ISSUED", "STAGE_PUT_ISSUED"].includes(record.phase) &&
+                    !record.stageId && !record.stageEtag && !record.contentAcknowledgedId &&
+                    record.sourceBaseline === JSON.stringify(settings.fileStates?.[path] || null)) {
+                    // No request for the final path was sent. A late staging
+                    // request can only reach the previous operation's own path.
+                    if (!(this.app.vault.getAbstractFileByPath(path) instanceof TFile) ||
+                        await this.readRemoteFileMetadata(stagePath)) continue;
+                    guard();
+                    delete ledger[path];
+                    try {
+                        await this.store.saveWithIdentityGuard(() => {
+                            this.assertCurrent(operation);
+                            if (ledger !== settings.pendingUploadOperations || ledger[path] ||
+                                rules !== JSON.stringify([settings.ignorePatterns, this.maxBytes()])) {
+                                throw new Error("上传记录或同步范围已变化");
+                            }
+                        });
+                    } catch (error) {
+                        if (ledger === settings.pendingUploadOperations && !ledger[path]) ledger[path] = record;
+                        throw error;
+                    }
+                    refreshed = true;
+                    continue;
+                }
+                if (!record.stageId || !record.stageEtag) continue;
                 if (["FINAL_ACKNOWLEDGED", "CLEANUP_ISSUED"].includes(record.phase)) {
                     const evidence = await this.inspectInterruptedUploadCleanup(path, operation);
                     guard();
@@ -3821,9 +4001,16 @@ export class OneDriveSyncService {
                     (record.finalEtag && mother.etag !== record.finalEtag) ||
                     (record.expectedRemoteId && mother.id !== record.expectedRemoteId) ||
                     (record.expectedRemoteEtag && mother.etag === record.expectedRemoteEtag)) continue;
+                const pinned = record.contentAcknowledgedId === mother.id && record.contentAcknowledgedEtag === mother.etag;
+                const acknowledgedAtSourceTime = record.contentAcknowledgedId === mother.id &&
+                    record.contentAcknowledgedEtag && mother.mtime === record.sourceMtime;
                 const local = this.app.vault.getAbstractFileByPath(path);
-                if (!(local instanceof TFile) || local.stat.size !== record.sourceBytes ||
-                    await this.sha256Bytes(await this.app.vault.readBinary(local)) !== record.sourceSha256) continue;
+                if (!(local instanceof TFile)) continue;
+                const originalStillLocal = async () =>
+                    local.stat.size === record.sourceBytes &&
+                    await this.sha256Bytes(await this.app.vault.readBinary(local)) === record.sourceSha256;
+                const localMatches = await originalStillLocal();
+                if (!localMatches && !pinned && !acknowledgedAtSourceTime) continue;
                 const data = await this.remoteBytes(mother);
                 if (await this.sha256Bytes(data) !== record.sourceSha256 ||
                     !sameBytes(data, await this.remoteBytes(stage))) continue;
@@ -3831,9 +4018,7 @@ export class OneDriveSyncService {
                 let verifiedMtime = record.sourceMtime;
                 let verifiedEtag = mother.etag;
                 if (mother.mtime !== record.sourceMtime) {
-                    if (record.contentAcknowledgedId === mother.id && record.contentAcknowledgedEtag === mother.etag) {
-                        if (local.stat.mtime !== record.sourceMtime ||
-                            await this.sha256Bytes(await this.app.vault.readBinary(local)) !== record.sourceSha256) continue;
+                    if (pinned && localMatches && local.stat.mtime === record.sourceMtime) {
                         const timestampGuard = () => {
                             guard();
                             if (this.app.vault.getAbstractFileByPath(path) !== local ||
@@ -3849,7 +4034,8 @@ export class OneDriveSyncService {
                             verifiedEtag = updated.eTag || updated.etag;
                         } catch (error: any) {
                             timestampGuard();
-                            if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status)) || !mother.mtime) {
+                            if (error?.isFatalAuth || error?.retryAfterMs ||
+                                [401, 403, 429, 507].includes(Number(error?.status)) || !mother.mtime) {
                                 throw error;
                             }
                             // The upload receipt proves this version, even when its
@@ -3858,10 +4044,9 @@ export class OneDriveSyncService {
                         } finally {
                             this.authority.finishFinal(operation);
                         }
-                    } else if (record.legacyTimestampFailure && !record.contentAcknowledgedId && mother.mtime) {
-                        // Old versions lost the content acknowledgement before
-                        // PATCH. Identical bytes permit settling the copy, not
-                        // rewriting an unpinned cloud version's timestamp.
+                    } else if (mother.mtime && (pinned || (record.legacyTimestampFailure && !record.contentAcknowledgedId))) {
+                        // Keep the proven upload separate from any later local edit.
+                        // Unpinned legacy uploads still require matching local bytes.
                         verifiedMtime = mother.mtime;
                     } else continue;
                 }
@@ -3869,8 +4054,8 @@ export class OneDriveSyncService {
                 const current = await this.readRemoteFileMetadata(path);
                 if (!current || current.id !== mother.id || current.etag !== verifiedEtag ||
                     current.mtime !== verifiedMtime || !sameBytes(data, await this.remoteBytes(current)) ||
-                    this.app.vault.getAbstractFileByPath(path) !== local ||
-                    await this.sha256Bytes(await this.app.vault.readBinary(local)) !== record.sourceSha256) continue;
+                    (!pinned && !acknowledgedAtSourceTime && !await originalStillLocal()) ||
+                    this.app.vault.getAbstractFileByPath(path) !== local) continue;
                 guard();
                 const priorStates = settings.fileStates;
                 const priorRecord = { ...record };
@@ -3895,10 +4080,14 @@ export class OneDriveSyncService {
             } catch (error: any) {
                 if (!this.isCurrent(operation)) throw new Error("同步已停止");
                 if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status))) throw error;
+                if (this.isTemporarySyncFailure(error)) {
+                    if (Number(error?.status) === 429 || error?.retryAfterMs) throw error;
+                    retryNeeded = true;
+                }
                 // An inconclusive repair holds this path; the rest of the vault can sync.
             }
         }
-        return refreshed;
+        return { refreshed, retryNeeded };
     }
 
     private async finishVerifiedStageCleanup(operation: RunTicket, path: string, evidence: {
@@ -5443,14 +5632,22 @@ export class OneDriveSyncService {
         assertGrantCurrent();
         const settings = this.settings();
         const previous = { ...settings };
+        const rootId = await this.verifyFirstSyncRoot(cloudVaultId, settings.fileStates || {}, assertGrantCurrent);
         Object.assign(settings, { vaultId: cloudVaultId, confirmationVaultId: cloudVaultId,
             confirmationAccountId: accountId, vaultName: name, confirmed: true, runAllowed: true,
-            firstSyncCompleted: true, enabled: false, status: "ready", lastSuccessAt: Date.now() });
+            firstSyncCompleted: true, status: "ready", lastSuccessAt: Date.now(),
+            deletionRoot: rootId ? { accountId, vaultId: cloudVaultId, deviceId: settings.deviceId, id: rootId } : undefined,
+            ...this.newBindingSyncMode() });
         try { await this.store.saveWithIdentityGuard(assertGrantCurrent); }
         catch (error) {
             if (this.settings() === settings) Object.assign(settings, previous, { runAllowed: false, enabled: false });
             throw error;
         }
+    }
+
+    private newBindingSyncMode() {
+        return { autoMode: "smart", enabled: true, onStartup: true, afterSave: true,
+            intervalMinutes: Platform.isMobile ? 5 : 1 } as const;
     }
 
     private async saveVerifiedFirstFileBinding(journal: FirstFileJournal): Promise<void> {
@@ -6031,6 +6228,7 @@ export class OneDriveSyncService {
     private async remoteFiles(
         forceFull = false, readOnly = false,
         firstCopy?: { vaultId: string; scope?: FirstUploadReadScope; onPage?: (page: number) => void; folderPaths?: Set<string> },
+        expectedRootId?: string,
     ): Promise<RemoteFile[]> {
         firstCopy?.scope?.assertCurrent();
         this.ensureRemoteIdentityFresh();
@@ -6055,6 +6253,9 @@ export class OneDriveSyncService {
             });
             if (readOnly && !root) return []; // New vault not created: a legitimate empty read-only target.
             if (!root?.folder || !root?.id) throw new Error("云端知识库目录身份未知，无法完成只读检查。");
+            if (expectedRootId && String(root.id) !== expectedRootId) {
+                throw new Error(localize("OneDrive 同步目录已变化，已暂缓删除。"));
+            }
             cache.rootId = String(root.id);
             cache.deltaLink = "";
             cache.nodes = {};
@@ -6221,6 +6422,7 @@ export class OneDriveSyncService {
                 if (operation && !this.isCurrent(operation)) throw error;
                 const uncertain: any = new Error("条件PUT请求结果未知，不得盲目重试，须核ItemID/ETag和实际远端字节");
                 uncertain.isUnknownCommit = true;
+                uncertain.cause = error;
                 throw uncertain;
             }
             if (!response.ok) {
@@ -6230,6 +6432,7 @@ export class OneDriveSyncService {
                     : await this.fetchError(response, `上传失败 (${response.status})`);
                 const error: any = new Error(message);
                 error.status = response.status;
+                error.retryAfterMs = graphRetryAfterMs(response.headers.get("retry-after"));
                 error.isUnknownCommit = uncertain;
                 throw error;
             }
@@ -6298,9 +6501,10 @@ export class OneDriveSyncService {
                         "Content-Type": "application/octet-stream",
                     },
                 });
-            } catch {
+            } catch (error) {
                 const failure: any = new Error("上传分块已发出但服务器结果未知；保留暂存与旧SHA，必须只读对账");
                 failure.isUnknownCommit = true;
+                failure.cause = error;
                 throw failure;
             }
             if (!response.ok) {
@@ -6309,6 +6513,7 @@ export class OneDriveSyncService {
                     ? "上传分块已发出但服务端结果未知（HTTP " + response.status + "）；停止重发，要求只读对账"
                     : await this.fetchError(response, `上传分块失败 (${response.status})`));
                 failure.status = response.status;
+                failure.retryAfterMs = graphRetryAfterMs(response.headers.get("retry-after"));
                 failure.isUnknownCommit = unknown;
                 throw failure;
             }
@@ -6361,7 +6566,7 @@ export class OneDriveSyncService {
             }
         } catch (error: any) {
             checkCurrent();
-            if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status))) throw error;
+            if (error?.isFatalAuth || error?.retryAfterMs || [401, 403, 429, 507].includes(Number(error?.status))) throw error;
         }
         try {
             // OneDrive can save the time while omitting it from the PATCH
@@ -6379,7 +6584,7 @@ export class OneDriveSyncService {
             }
         } catch (error: any) {
             checkCurrent();
-            if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status))) throw error;
+            if (error?.isFatalAuth || error?.retryAfterMs || [401, 403, 429, 507].includes(Number(error?.status))) throw error;
         }
         throw Object.assign(new Error("OneDrive 未确认文件原修改时间"), { isUnknownCommit: true });
     }
@@ -6584,7 +6789,7 @@ export class OneDriveSyncService {
 
     private async fetchGraph(
         pathOrUrl: string, options: any, operation?: RunTicket,
-        beforeDispatch?: () => void,
+        beforeDispatch?: () => void, checkPhysicalPath?: () => Promise<void>,
     ): Promise<Response> {
         const sessionGuard: (() => void) | undefined =
             (this.auth as any).createDispatchGuard?.();
@@ -6593,6 +6798,11 @@ export class OneDriveSyncService {
             // remain valid after awaiting a token or 401 refresh.
             sessionGuard?.();
             if (operation) this.assertCurrent(operation);
+            if (checkPhysicalPath) {
+                await checkPhysicalPath();
+                sessionGuard?.();
+                if (operation) this.assertCurrent(operation);
+            }
             // Synchronous final check after each credential await. No await
             // between this check and the physical network dispatch.
             beforeDispatch?.();
@@ -6634,6 +6844,7 @@ export class OneDriveSyncService {
         if (response.status < 200 || response.status >= 300) {
             const error: any = new Error(`下载失败：${remote.path} (HTTP ${response.status})`);
             error.status = response.status;
+            error.retryAfterMs = graphRetryAfterMs(response.headers?.["retry-after"]);
             error.isMissingFile = response.status === 404;
             throw error;
         }
@@ -6657,6 +6868,9 @@ export class OneDriveSyncService {
         if (!downloadUrl) throw new Error("OneDrive 未提供有效的文件下载地址");
         try {
             const response = await fetch(downloadUrl, { cache: "no-store", signal: scope?.signal });
+            if (!response.ok && (response.status === 429 || response.headers.has("retry-after"))) {
+                return { status: response.status, headers: { "retry-after": response.headers.get("retry-after") } };
+            }
             if (!response.ok) throw new Error(`download failed (${response.status})`);
             const meter = scope && response.body && typeof TransformStream === "function"
                 ? new TransformStream<Uint8Array, Uint8Array>({
@@ -7027,6 +7241,7 @@ export class OneDriveSyncService {
 
     private async deleteRemote(
         item: RemoteFile, operation?: RunTicket, beforeDispatch?: () => void,
+        checkPhysicalPath?: () => Promise<void>,
     ): Promise<void> {
         if (operation) this.assertCurrent(operation);
         if (!item.id || !item.etag) {
@@ -7035,13 +7250,15 @@ export class OneDriveSyncService {
         const response = await this.fetchGraph("/drive/items/" + encodeURIComponent(item.id), {
             method: "DELETE",
             headers: { "If-Match": item.etag },
-        }, operation, beforeDispatch);
+        }, operation, beforeDispatch, checkPhysicalPath);
         // 404 after conditional DELETE is not proof of our own successful commit.
         // Keep the old baseline and pending record until independent reconciliation.
         if (!response.ok) {
             const error = new Error(await this.fetchError(response,
                 "OneDrive删除未获确认（含404），保留旧基线等待只读对账"));
-            if ([401, 403, 507].includes(response.status)) Object.assign(error, { status: response.status });
+            if (checkPhysicalPath || [401, 403, 408, 429, 500, 502, 503, 504, 507].includes(response.status)) {
+                Object.assign(error, { status: response.status, retryAfterMs: graphRetryAfterMs(response.headers.get("retry-after")) });
+            }
             throw error;
         }
     }
@@ -7292,7 +7509,7 @@ export class OneDriveSyncService {
         };
     }
 
-    private async fail(error: any, currentPath = ""): Promise<void> {
+    private async fail(error: any, currentPath = "", silent = false): Promise<void> {
         const settings = this.settings();
         settings.status = "failed";
 
@@ -7300,7 +7517,7 @@ export class OneDriveSyncService {
         settings.lastError = `${safeOneDriveError(error)}${detail}`;
         console.error("[SmartMD OneDrive Sync Failure Detail]:", settings.lastError);
         await (this.store as any).save();
-        new Notice(localize("OneDrive 同步已暂停：{0}", localizeMessage(settings.lastError)), 8000);
+        if (!silent) new Notice(localize("OneDrive 同步已暂停：{0}", localizeMessage(settings.lastError)), 8000);
     }
 
     private async purgeExpiredRecovery(): Promise<void> {

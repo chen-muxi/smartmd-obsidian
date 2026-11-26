@@ -1388,48 +1388,6 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             }
         }
 
-        const retained = this.runtime.oneDrive.listAndroidRetainedDeletionPaths();
-        if (retained.length) {
-            const area = container.createDiv({ cls: "smartmd-onedrive-delete-review" });
-            new Setting(area).setClass("smartmd-settings-subheading").setName(localize("云端缺失，本机笔记已保留")).setHeading();
-            area.createEl("p", { text: localize("下面的安卓笔记有未同步的编辑，或缺少可核验的同步版本。请比较两个版本并保留需要的内容。") });
-            const paths = area.createEl("ul");
-            for (const path of retained) paths.createEl("li", { text: path });
-        }
-        const pending = this.runtime.oneDrive.listPendingOneDriveDeletions();
-        if (pending.length) {
-            const area = container.createDiv({ cls: "smartmd-onedrive-delete-review" });
-            new Setting(area).setClass("smartmd-settings-subheading").setName(localize("待人工确认的单端删除（") + pending.length + localize("项）")).setHeading();
-            area.createEl("p", { text:
-                localize("勾选要在另一端删除的文件。") });
-            const chosen = new Set<string>();
-            const displayed = new Map(pending.map(item => [item.path, item.reviewKey]));
-            for (const item of pending) {
-                const row = area.createDiv({ cls: "smartmd-card" });
-                const checkbox = row.createEl("input", { type: "checkbox" });
-                checkbox.onchange = () => {
-                    if (checkbox.checked) chosen.add(item.path);
-                    else chosen.delete(item.path);
-                };
-                row.createEl("strong", { text: item.path });
-                row.createEl("p", { text: item.direction === "cloud"
-                    ? localize("授权后会将云端这份移入 OneDrive 回收站")
-                    : Platform.isAndroidApp ? localize("授权后直接删除安卓上的本地文件")
-                    : localize("授权后会将此本地笔记移入 Windows 系统回收站") });
-            }
-            area.createEl("button", { text: localize("确认勾选文件的删除"), cls: "mod-warning" })
-                .onclick = async () => {
-                    if (!chosen.size) { new Notice(localize("请先勾选目标文件")); return; }
-                    try {
-                        await this.runtime.oneDrive.confirmPendingOneDriveDeletions(
-                            [...chosen], true, undefined, displayed);
-                        new Notice(localize("已删除选中的文件"));
-                    } catch (error: any) {
-                        new Notice(localize("本次删除未完成：") + localizeMessage(safeOneDriveError(error)), 8000);
-                    }
-                    this.display();
-                };
-        }
         const recoveries = this.runtime.oneDrive.listOneDriveRecoveries();
         if (recoveries.length) {
             const area = container.createDiv({ cls: "smartmd-onedrive-recoveries" });
@@ -1654,7 +1612,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             .setName(localize("同步方式"))
             .setDesc(settings.firstSyncCompleted
                 ? localize("推荐使用智能自动同步；移动端只在 Obsidian 打开期间运行。")
-                : localize("首次手动同步成功后才能启用自动同步。"))
+                : localize("首次同步完成后会开启自动同步。"))
             .addDropdown((dropdown) => dropdown
                 .addOption("smart", localize("智能自动同步（推荐）"))
                 .addOption("manual", localize("仅手动同步"))
