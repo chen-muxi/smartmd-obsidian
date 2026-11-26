@@ -1186,7 +1186,15 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         // but deliberately has no "release", "retry" or "delete" button.
         const pendingUnknown = Object.entries(settings.pendingUploadOperations || {})
             .filter(([, record]: [string, any]) => record && this.runtime.oneDrive.canAuditUnknownUpload(record));
-        if (pendingUnknown.length) {
+        if (Object.keys(settings.pendingUploadOperations || {}).length && this.runtime.oneDrive.canStartManualSync()) {
+            const entries = Object.keys(settings.pendingUploadOperations || {});
+            const info = new Setting(container)
+                .setName(localize("有 {0} 个文件等待核对上传结果", entries.length))
+                .setDesc(localize("其他文件照常同步。每次同步会自动检查这些文件。"));
+            const details = info.descEl.createEl("details");
+            details.createEl("summary", { text: localize("查看文件") });
+            for (const path of entries) details.createEl("p", { text: path });
+        } else if (pendingUnknown.length) {
             const section = container.createDiv({ cls: "smartmd-onedrive-unknown-review" });
             new Setting(section).setClass("smartmd-settings-subheading").setName(localize("OneDrive 上次上传结果未明：") + pendingUnknown.length + localize(" 项")).setHeading();
             section.createEl("p", { text:

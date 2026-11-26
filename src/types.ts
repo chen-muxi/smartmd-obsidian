@@ -199,6 +199,8 @@ export interface OneDriveSyncSettings {
         accountId: string; vaultId: string; deviceId: string;
         motherPath: string; direction: "upload";
         sourceSha256: string; sourceBytes: number; sourceMtime?: number; sourceBaseline?: string;
+        contentAcknowledgedId?: string; contentAcknowledgedEtag?: string;
+        legacyTimestampFailure?: boolean; verifiedRemoteMtime?: number;
         expectedRemoteId: string; expectedRemoteEtag: string;
         stagingPath: string;
         phase: "STAGE_SESSION_ISSUED" | "STAGE_PUT_ISSUED" |

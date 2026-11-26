@@ -1183,7 +1183,7 @@ export class OneDriveSyncService {
     // After a verified final target was durably saved, the staging DELETE
     // acknowledgement may be lost. This is a separate recovery state from
     // RECONCILE_REQUIRED; neither a 404 nor a filename is sufficient alone.
-    private async inspectInterruptedUploadCleanup(path: string): Promise<{
+    private async inspectInterruptedUploadCleanup(path: string, operation?: RunTicket): Promise<{
         path: string; sourceSha256: string; remoteId: string; remoteEtag: string;
         stageId: string; stageEtag: string; stagePath: string;
         stageState: "PRESENT" | "ABSENT_CONFIRMED_BY_GET";
@@ -1192,7 +1192,7 @@ export class OneDriveSyncService {
         const record: any = s.pendingUploadOperations?.[path];
         const baseline: any = s.fileStates?.[path];
         const account = String((this.store as any).settings.local.microsoftAccountId || "");
-        if (!this.resumedHistoricalIdentityTrusted() ||
+        if (!(operation ? this.isCurrent(operation) : this.resumedHistoricalIdentityTrusted()) ||
             !record || !baseline ||
             !["FINAL_ACKNOWLEDGED", "CLEANUP_ISSUED", "CLEANUP_VERIFIED"].includes(record.phase) ||
             record.motherPath !== path || record.direction !== "upload" ||
@@ -1215,24 +1215,27 @@ export class OneDriveSyncService {
         const length = Number(record.sourceBytes);
         if (record.stagingPath !== expectedStage ||
             !Number.isSafeInteger(length) || length < 0 ||
-            length > this.maxResumedFileBytes()) {
+            length > (operation ? this.maxBytes() : this.maxResumedFileBytes())) {
             throw new Error("原操作暂存路径或源字节大小不可信，拒绝恢复");
         }
         const local = this.app.vault.getAbstractFileByPath(path);
-        if (!(local instanceof TFile) || local.stat.size !== length ||
+        if (!operation && (!(local instanceof TFile) || local.stat.size !== length ||
             await this.sha256Bytes(await this.app.vault.readBinary(local)) !==
-                String(record.sourceSha256).toLowerCase()) {
+                String(record.sourceSha256).toLowerCase())) {
             throw new Error("结算中断后本机原文已改变，必须保留历史锁");
         }
-        const remoteList = await this.remoteFiles(true, true);
-        if (remoteList.length > 4000) throw new Error("远端清单超限，拒绝恢复");
+        const remoteList = operation
+            ? (await Promise.all([this.readRemoteFileMetadata(path), this.readRemoteFileMetadata(expectedStage)]))
+                .filter((item): item is RemoteFile => item !== null)
+            : await this.remoteFiles(true, true);
+        if (!operation && remoteList.length > 4000) throw new Error("远端清单超限，拒绝恢复");
         const mother = remoteList.filter((item) => item.path === path);
         const stage = remoteList.filter((item) => item.path === expectedStage);
         if (mother.length !== 1 || stage.length > 1 ||
             mother[0].id !== record.finalId ||
             mother[0].etag !== record.finalEtag ||
             mother[0].size !== length ||
-            (record.sourceMtime !== undefined && mother[0].mtime !== record.sourceMtime) ||
+            (record.sourceMtime !== undefined && mother[0].mtime !== (record.verifiedRemoteMtime ?? record.sourceMtime)) ||
             await this.sha256Bytes(await this.remoteBytes(mother[0])) !==
                 String(record.sourceSha256).toLowerCase()) {
             throw new Error("结算中断后云端最终原稿身份或字节不匹配");
@@ -1241,6 +1244,7 @@ export class OneDriveSyncService {
         if (stage.length === 1) {
             if (record.phase === "CLEANUP_VERIFIED" ||
                 stage[0].id !== record.stageId ||
+                stage[0].id === mother[0].id ||
                 stage[0].etag !== record.stageEtag ||
                 stage[0].size !== length ||
                 await this.sha256Bytes(await this.remoteBytes(stage[0])) !==
@@ -1253,10 +1257,11 @@ export class OneDriveSyncService {
             // an independent direct GET against the historical staging Item ID.
             const response = await this.fetchGraph(
                 "/drive/items/" + encodeURIComponent(String(record.stageId)),
-                { method: "GET" },
+                { method: "GET" }, operation,
             );
             if (response.status !== 404) {
-                throw new Error("原暂存Item ID尚未由微软GET确认为不存在，保持历史锁");
+                throw Object.assign(new Error("原暂存Item ID尚未由微软GET确认为不存在，保持历史锁"),
+                    { status: response.status });
             }
             stageState = "ABSENT_CONFIRMED_BY_GET";
         }
@@ -1633,6 +1638,7 @@ export class OneDriveSyncService {
         const pending = (this.settings().pendingDeletions || {}) as Record<string, any>;
         return Object.entries(pending)
             .filter(([path, entry]) => (entry?.direction === "cloud" || entry?.direction === "vault")
+                && !this.hasPendingUploadAt(path)
                 && this.pendingDeletionPathInCurrentScope(path, entry.direction))
             .map(([path, entry]) => ({
                 path,
@@ -1668,6 +1674,7 @@ export class OneDriveSyncService {
         }
         const unique = [...new Set(paths)];
         if (unique.length !== paths.length) throw new Error("同一个文件不可重复授权删除");
+        if (unique.some(path => this.hasPendingUploadAt(path))) throw new Error("该文件上次上传仍在核对，暂时无法删除。");
         const settings = this.settings();
         const requireNoDeletionStorm = (allRemote: RemoteFile[]) => {
             const skipped = this.skippedLocalPaths();
@@ -2477,7 +2484,7 @@ export class OneDriveSyncService {
             !this.deletionApprovalRunning && !this.resumedInFlight &&
             !this.uploadLedgerReconciliationInFlight && !this.uploadLedgerSettlementInFlight &&
             !this.unknownSettlementInFlight && !settings.androidFirstDownload &&
-            (!uploads || (typeof uploads === "object" && !Array.isArray(uploads) && !Object.keys(uploads).length)) &&
+            (!uploads || (typeof uploads === "object" && !Array.isArray(uploads))) &&
             !hasUnfinishedOneDriveSetup(settings, accountId, settings.vaultId, settings.deviceId);
     }
 
@@ -2490,13 +2497,8 @@ export class OneDriveSyncService {
             this.resumedApprovalGeneration === generation;
         await this.assertFirstCommitGraphAccount(settings.confirmationAccountId!);
         const remote = await this.remoteFiles(true, true);
-        if (remote.some(item => item.path.startsWith("_suite_staging/"))) {
-            throw new Error("上次上传还没有核对完成，请先检查上传记录。");
-        }
         if (!unchanged() || !this.canResumeManualSync()) return null;
         this.authority.confirm(settings);
-        settings.status = "ready";
-        settings.lastError = "";
         try {
             await this.store.saveWithIdentityGuard(() => {
                 if (!unchanged() || !this.canRun()) throw new Error("知识库连接已变化，请再试一次。");
@@ -3061,9 +3063,8 @@ export class OneDriveSyncService {
     async enableAutoSync(): Promise<void> {
         const settings = this.settings();
         if (!settings.firstSyncCompleted) throw new Error("首次手动同步成功后才能启用自动同步。");
-        if (this.isBusy() ||
-            Object.keys(settings.pendingUploadOperations || {}).length) {
-            throw new Error("请等当前同步或上次未完成的上传处理完毕，再开启自动同步。");
+        if (this.isBusy()) {
+            throw new Error("请等当前同步结束后再切换同步方式。");
         }
         if (!this.canRun()) {
             throw new Error("本轮同步执行许可已失效。请先重新只读核对账号、云库、版本和文件范围并明确批准；切换自动同步方式不能恢复旧许可。");
@@ -3093,21 +3094,19 @@ export class OneDriveSyncService {
         reportProgress: ((message: string) => void) | null = null,
         silentSuccess = false,
     ): Promise<boolean> {
-        if (this.running || this.deletionApprovalRunning || this.uploadLedgerReconciliationInFlight ||
-            this.uploadLedgerSettlementInFlight || !this.canRun()) return false;
+        if (this.running || this.deletionApprovalRunning || this.resumedInFlight || this.unknownSettlementInFlight ||
+            this.uploadLedgerReconciliationInFlight || this.uploadLedgerSettlementInFlight || !this.canRun()) return false;
         if (firstSync) {
             if (!this.activeFirstSyncTicket) return false;
             this.activeFirstSyncTicket = null;
         }
         const firstReceiverResume = firstSync && this.activeFirstReceiverResume;
         if (!firstSync && !this.settings().firstSyncCompleted) return false;
-        // An unresolved earlier write blocks the whole automatic/manual batch,
-        // not merely its staging path. A new grant is not proof the original
-        // upload session or the mother file finished.
         const existing = this.settings().pendingUploadOperations;
         if (existing && (typeof existing !== "object" || Array.isArray(existing))) {
             throw new Error("历史上传操作记录格式无效，禁止继续同步");
         }
+        if (firstSync && Object.keys(existing || {}).length) return false;
         // A prior round may have durably saved its SHA/ItemID/ETag baseline
         // and confirmed staging cleanup, then stopped before releasing the
         // local journal. Persist the baseline first; release only matching
@@ -3121,18 +3120,16 @@ export class OneDriveSyncService {
                 this.uploadLedgerReconciliationInFlight = false;
             }
         }
-        const pending = this.settings().pendingUploadOperations || {};
-        if (Object.keys(pending).length) {
-            const settings = this.settings();
-            settings.status = "paused";
-            settings.lastError = "尚有上次上传操作、会话或暂存未按原身份与版本核明；先只读对账，不得执行新同步";
-            await (this.store as any).save();
-            return false;
-        }
         const operation = this.authority.start(this.settings(), this.contextKey());
         this.running = true;
         this.notifyStatusChange();
         const settings = this.settings();
+        for (const [path, record] of Object.entries(settings.pendingUploadOperations || {}) as [string, any][]) {
+            if (record && typeof record === "object" &&
+                settings.lastError === "OneDrive 未确认文件原修改时间 (处理文件: " + redactOneDriveText(path) + ")") {
+                record.legacyTimestampFailure = true;
+            }
+        }
         settings.status = "syncing";
         settings.lastError = "";
         settings.pendingDeletions = settings.pendingDeletions || {};
@@ -3142,7 +3139,7 @@ export class OneDriveSyncService {
         try {
             reportProgress?.(localize("正在读取本地与云端状态…"));
             const local = prepared?.local || this.localFiles();
-            const previous = settings.fileStates || {};
+            let previous = settings.fileStates || {};
             let allRemote = prepared?.allRemote || await this.remoteFiles();
             if (!firstSync && !prepared && !allRemote.length &&
                 Object.values(previous).some(item => Boolean((item as SyncFileState)?.remoteId))) {
@@ -3150,11 +3147,11 @@ export class OneDriveSyncService {
                 // vault. An empty list never permits deleting a local copy.
                 allRemote = await this.remoteFiles(true, true);
             }
-            if (allRemote.some((item) => item.path.startsWith("_suite_staging/"))) {
-                // Legacy orphan staging can predate the durable ledger; without
-                // an authenticated mother-path/operation relation this batch
-                // cannot safely create another stage/session.
-                throw new Error("云端发现旧上传暂存而缺少原操作完成证明，已停止整批后续写入并等待只读对账");
+            if (!firstSync && Object.keys(settings.pendingUploadOperations || {}).length) {
+                if (await this.recoverVerifiedUploads(operation)) {
+                    allRemote = await this.remoteFiles(true, true);
+                    previous = settings.fileStates || {};
+                }
             }
             const skippedPaths = this.skippedLocalPaths();
             for (const item of allRemote) {
@@ -3277,6 +3274,12 @@ export class OneDriveSyncService {
                 const localItem = localMap.get(path);
                 const remoteItem = remoteMap.get(path);
                 const old = previous[path];
+                if (this.hasPendingUploadAt(path)) {
+                    if (old) next[path] = old;
+                    delete settings.pendingDeletions[path];
+                    skippedPaths.add(path);
+                    continue;
+                }
                 if (Boolean(localItem) === Boolean(remoteItem)) delete settings.pendingDeletions[path];
                 if (!localItem && !remoteItem) {
                     // Keep the last known version if the path reappears.
@@ -3482,7 +3485,7 @@ export class OneDriveSyncService {
                                 let uploaded: any;
                                 if (firstSync) {
                                     uploaded = await this.upload(path, data, false, null, operation, undefined, undefined, readMtime);
-                                    uploaded = await this.setUploadedModificationTime(uploaded, readMtime, operation);
+                                    uploaded = await this.setUploadedModificationTime(uploaded, readMtime, data, operation);
                                 } else {
                                     await this.assertFresh(operation, path, localItem, undefined);
                                     uploaded = await this.uploadStaged(operation, path, data, false, null);
@@ -3565,19 +3568,21 @@ export class OneDriveSyncService {
                     // or drive out of quota). Do not try the next session or
                     // treat a second file's success as recovery of the scope.
                     const status = Number(fileError?.status || 0);
-                    const invalidCloudScope = status === 403 || status === 507 ||
+                    const invalidCloudScope = status === 401 || status === 403 || status === 507 ||
                         (status === 404 && !fileError?.isMissingFile);
                     if (!this.isCurrent(operation) || settings.androidFirstDownload || fileError?.isFatalAuth ||
-                        fileError?.isUnknownCommit || invalidCloudScope) {
+                        (fileError?.isUnknownCommit && (firstSync || !this.hasPendingUploadAt(path))) || invalidCloudScope) {
                         throw fileError;
                     }
+                    const pendingUpload = this.hasPendingUploadAt(path);
+                    if (pendingUpload) delete settings.pendingDeletions[path];
                     if (old) {
                         next[path] = old;
                     } else {
                         delete next[path];
                     }
-                    const diag = this.parseFileErrorToDiagnostic(path, fileError, localItem ? "UPLOAD" : "DOWNLOAD");
-                    failedDiagnostics.push(diag);
+                    if (pendingUpload) skippedPaths.add(path);
+                    else failedDiagnostics.push(this.parseFileErrorToDiagnostic(path, fileError, localItem ? "UPLOAD" : "DOWNLOAD"));
                 }
             }
 
@@ -3669,7 +3674,7 @@ export class OneDriveSyncService {
             }
             this.statusCallback?.("SmartMD: 已同步");
             if (!reportProgress && !silentSuccess) {
-                new Notice(skippedPaths.size ? localize("OneDrive 同步完成，{0} 个文件因大小或排除规则未处理", skippedPaths.size) : localize("OneDrive 同步完成"));
+                new Notice(skippedPaths.size ? localize("OneDrive 同步完成，跳过 {0} 个文件", skippedPaths.size) : localize("OneDrive 同步完成"));
             }
             return true;
 
@@ -3724,7 +3729,9 @@ export class OneDriveSyncService {
                 !baseline || baseline.remoteId !== record.finalId ||
                 baseline.remoteEtag !== record.finalEtag ||
                 baseline.localHash !== record.sourceSha256) {
-                throw new Error("旧上传已有最终提交阶段但可信母文件基线身份不匹配，拒绝整轮状态覆写");
+                if (baseline) merged[path] = baseline;
+                else delete merged[path];
+                continue;
             }
             merged[path] = baseline;
         }
@@ -3747,6 +3754,151 @@ export class OneDriveSyncService {
             s.pendingUploadOperations = {};
         }
         return s.pendingUploadOperations;
+    }
+
+    private hasPendingUploadAt(path: string): boolean {
+        const key = path.normalize("NFC").toLowerCase();
+        return Object.keys(this.settings().pendingUploadOperations || {}).some(pending => {
+            const other = pending.normalize("NFC").toLowerCase();
+            return key === other || key.startsWith(other + "/") || other.startsWith(key + "/");
+        });
+    }
+
+    private async recoverVerifiedUploads(operation: RunTicket): Promise<boolean> {
+        const settings = this.settings();
+        const ledger = this.uploadLedger();
+        let refreshed = false;
+        for (const [path, record] of Object.entries(ledger)) {
+            if (!record ||
+                record.motherPath !== path || record.direction !== "upload" ||
+                record.accountId !== settings.confirmationAccountId || record.vaultId !== settings.vaultId ||
+                record.deviceId !== settings.deviceId || typeof record.operationId !== "string" ||
+                !record.operationId || !record.stageId || !record.stageEtag ||
+                !/^[a-f0-9]{64}$/.test(record.sourceSha256 || "") ||
+                !Number.isFinite(record.sourceMtime) || record.sourceMtime <= 0 ||
+                !Number.isSafeInteger(record.sourceBytes) || record.sourceBytes < 0 || record.sourceBytes > this.maxBytes() ||
+                !path || path.includes("\\") || path.split("/").some(part => !part || part === "." || part === "..") ||
+                this.isIgnored(path)) continue;
+            const stagePath = "_suite_staging/" + record.operationId.replace(/[\\/:*?"<>|.]/g, "_") +
+                "/" + path.replace(/[\\/:*?"<>|]/g, "_");
+            if (record.stagingPath !== stagePath) continue;
+            const rules = JSON.stringify([settings.ignorePatterns, this.maxBytes()]);
+            const guard = () => {
+                this.assertCurrent(operation);
+                if (ledger !== settings.pendingUploadOperations || ledger[path] !== record ||
+                    rules !== JSON.stringify([settings.ignorePatterns, this.maxBytes()])) throw new Error("上传记录或同步范围已变化");
+            };
+            try {
+                if (["FINAL_ACKNOWLEDGED", "CLEANUP_ISSUED"].includes(record.phase)) {
+                    const evidence = await this.inspectInterruptedUploadCleanup(path, operation);
+                    guard();
+                    await this.finishVerifiedStageCleanup(operation, path, evidence, guard);
+                    refreshed = true;
+                    continue;
+                }
+                if (!["RECONCILE_REQUIRED", "FINAL_PUT_ISSUED"].includes(record.phase) ||
+                    record.sourceBaseline !== JSON.stringify(settings.fileStates?.[path] || null)) continue;
+                const mother = await this.readRemoteFileMetadata(path);
+                const stage = await this.readRemoteFileMetadata(stagePath);
+                if (!mother?.id || !mother.etag || !stage || stage.id !== record.stageId || stage.id === mother.id || stage.etag !== record.stageEtag ||
+                    stage.size !== record.sourceBytes || mother.size !== record.sourceBytes ||
+                    (record.finalId && mother.id !== record.finalId) ||
+                    (record.finalEtag && mother.etag !== record.finalEtag) ||
+                    (record.expectedRemoteId && mother.id !== record.expectedRemoteId) ||
+                    (record.expectedRemoteEtag && mother.etag === record.expectedRemoteEtag)) continue;
+                const local = this.app.vault.getAbstractFileByPath(path);
+                if (!(local instanceof TFile) || local.stat.size !== record.sourceBytes ||
+                    await this.sha256Bytes(await this.app.vault.readBinary(local)) !== record.sourceSha256) continue;
+                const data = await this.remoteBytes(mother);
+                if (await this.sha256Bytes(data) !== record.sourceSha256 ||
+                    !sameBytes(data, await this.remoteBytes(stage))) continue;
+                guard();
+                let verifiedMtime = record.sourceMtime;
+                let verifiedEtag = mother.etag;
+                if (mother.mtime !== record.sourceMtime) {
+                    if (record.contentAcknowledgedId === mother.id && record.contentAcknowledgedEtag === mother.etag) {
+                        if (local.stat.mtime !== record.sourceMtime ||
+                            await this.sha256Bytes(await this.app.vault.readBinary(local)) !== record.sourceSha256) continue;
+                        const timestampGuard = () => {
+                            guard();
+                            if (this.app.vault.getAbstractFileByPath(path) !== local ||
+                                local.stat.mtime !== record.sourceMtime ||
+                                record.sourceBaseline !== JSON.stringify(settings.fileStates?.[path] || null)) {
+                                throw new Error("上传原文件已变化");
+                            }
+                        };
+                        this.authority.beginFinal(operation);
+                        try {
+                            const updated = await this.setUploadedModificationTime(
+                                { id: mother.id, eTag: mother.etag }, record.sourceMtime, data, operation, timestampGuard);
+                            verifiedEtag = updated.eTag || updated.etag;
+                        } finally {
+                            this.authority.finishFinal(operation);
+                        }
+                    } else if (record.legacyTimestampFailure && !record.contentAcknowledgedId && mother.mtime) {
+                        // Old versions lost the content acknowledgement before
+                        // PATCH. Identical bytes permit settling the copy, not
+                        // rewriting an unpinned cloud version's timestamp.
+                        verifiedMtime = mother.mtime;
+                    } else continue;
+                }
+                refreshed = true;
+                const current = await this.readRemoteFileMetadata(path);
+                if (!current || current.id !== mother.id || current.etag !== verifiedEtag ||
+                    current.mtime !== verifiedMtime || !sameBytes(data, await this.remoteBytes(current)) ||
+                    this.app.vault.getAbstractFileByPath(path) !== local ||
+                    await this.sha256Bytes(await this.app.vault.readBinary(local)) !== record.sourceSha256) continue;
+                guard();
+                const priorStates = settings.fileStates;
+                const priorRecord = { ...record };
+                settings.fileStates = { ...priorStates, [path]: {
+                    localMtime: record.sourceMtime, localSize: record.sourceBytes, localHash: record.sourceSha256,
+                    remoteId: current.id, remoteEtag: current.etag,
+                } };
+                Object.assign(record, { phase: "FINAL_ACKNOWLEDGED", finalId: current.id, finalEtag: current.etag,
+                    verifiedRemoteMtime: verifiedMtime });
+                try { await this.store.saveWithIdentityGuard(guard); }
+                catch (error) {
+                    if (this.settings() === settings && ledger[path] === record) {
+                        settings.fileStates = priorStates;
+                        ledger[path] = priorRecord;
+                    }
+                    throw error;
+                }
+                await this.finishVerifiedStageCleanup(operation, path, {
+                    remoteId: current.id, remoteEtag: current.etag, stageId: stage.id, stageEtag: stage.etag,
+                    stagePath, stageState: "PRESENT",
+                }, guard);
+            } catch (error: any) {
+                if (!this.isCurrent(operation)) throw new Error("同步已停止");
+                if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status))) throw error;
+                // An inconclusive repair holds this path; the rest of the vault can sync.
+            }
+        }
+        return refreshed;
+    }
+
+    private async finishVerifiedStageCleanup(operation: RunTicket, path: string, evidence: {
+        remoteId: string; remoteEtag: string; stageId: string; stageEtag: string; stagePath: string;
+        stageState: "PRESENT" | "ABSENT_CONFIRMED_BY_GET";
+    }, guard: () => void): Promise<void> {
+        guard();
+        this.authority.beginFinal(operation);
+        try {
+            if (evidence.stageState === "PRESENT") await this.setUploadPhase(path, "CLEANUP_ISSUED");
+            const latest = await this.readRemoteFileMetadata(path);
+            if (!latest || latest.id !== evidence.remoteId || latest.etag !== evidence.remoteEtag) return;
+            guard();
+            if (evidence.stageState === "PRESENT") {
+                await this.deleteRemote({ path: evidence.stagePath, id: evidence.stageId,
+                    etag: evidence.stageEtag, name: "", size: 0 }, operation, guard);
+            }
+            guard();
+            await this.setUploadPhase(path, "CLEANUP_VERIFIED");
+            await this.clearVerifiedUploadLedger(this.settings().fileStates);
+        } finally {
+            this.authority.finishFinal(operation);
+        }
     }
 
     private async setUploadPhase(
@@ -5011,7 +5163,7 @@ export class OneDriveSyncService {
                         } finally { fs.closeSync(fd); }
                     };
                     result = await this.upload(file.path, bytes, false, null, undefined, undefined, guard, file.mtime);
-                    result = await this.setUploadedModificationTime(result, file.mtime, undefined, guard);
+                    result = await this.setUploadedModificationTime(result, file.mtime, bytes, undefined, guard);
                 } finally {
                     this.previewVaultId = before;
                 }
@@ -6163,7 +6315,7 @@ export class OneDriveSyncService {
     }
 
     private async setUploadedModificationTime(
-        uploaded: any, mtime: number, operation?: RunTicket, beforeGraphDispatch?: () => void,
+        uploaded: any, mtime: number, data: ArrayBuffer, operation?: RunTicket, beforeGraphDispatch?: () => void,
     ): Promise<any> {
         const version = uploaded?.eTag || uploaded?.etag;
         if (!uploaded?.id || !version || !Number.isFinite(mtime) || mtime <= 0) {
@@ -6171,22 +6323,42 @@ export class OneDriveSyncService {
         }
         if (this.remoteModificationTime(uploaded) === mtime &&
             uploaded.fileSystemInfo?.lastModifiedDateTime) return uploaded;
+        const itemPath = "/drive/items/" + encodeURIComponent(uploaded.id);
+        const checkCurrent = () => {
+            if (operation) this.assertCurrent(operation);
+            beforeGraphDispatch?.();
+        };
         try {
-            const updated = await this.graph("PATCH", "/drive/items/" + encodeURIComponent(uploaded.id),
+            const updated = await this.graph("PATCH", itemPath,
                 { fileSystemInfo: { lastModifiedDateTime: new Date(mtime).toISOString() } },
-                { "If-Match": version }, () => {
-                    if (operation) this.assertCurrent(operation);
-                    beforeGraphDispatch?.();
-                });
-            if (updated?.id !== uploaded.id || !(updated.eTag || updated.etag) ||
-                !updated.fileSystemInfo?.lastModifiedDateTime || this.remoteModificationTime(updated) !== mtime) {
-                throw new Error("OneDrive 未确认文件原修改时间");
+                { "If-Match": version }, checkCurrent);
+            if (updated?.id === uploaded.id && (updated.eTag || updated.etag) &&
+                updated.fileSystemInfo?.lastModifiedDateTime && this.remoteModificationTime(updated) === mtime) {
+                return { ...uploaded, ...updated, eTag: updated.eTag || updated.etag };
             }
-            return { ...uploaded, ...updated };
         } catch (error: any) {
-            error.isUnknownCommit = true;
-            throw error;
+            checkCurrent();
+            if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status))) throw error;
         }
+        try {
+            // OneDrive can save the time while omitting it from the PATCH
+            // response. Check the exact item and bytes before accepting it.
+            const select = "?$select=id,name,eTag,size,fileSystemInfo";
+            const current = await this.graph("GET", itemPath + select, undefined, undefined, checkCurrent);
+            const etag = current?.eTag || current?.etag;
+            if (current?.id === uploaded.id && etag && current.size === data.byteLength &&
+                this.remoteModificationTime(current) === mtime &&
+                sameBytes(await this.remoteBytes({ id: current.id, etag, path: String(current.name || ""),
+                    name: String(current.name || ""), size: current.size }), data)) {
+                const after = await this.graph("GET", itemPath + select, undefined, undefined, checkCurrent);
+                if (after?.id === current.id && (after.eTag || after.etag) === etag &&
+                    this.remoteModificationTime(after) === mtime) return { ...uploaded, ...current, eTag: etag };
+            }
+        } catch (error: any) {
+            checkCurrent();
+            if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status))) throw error;
+        }
+        throw Object.assign(new Error("OneDrive 未确认文件原修改时间"), { isUnknownCommit: true });
     }
 
     private async uploadStaged(
@@ -6210,6 +6382,9 @@ export class OneDriveSyncService {
         if (!appRelative) {
             const ledger = this.uploadLedger();
             if (ledger[path]) throw new Error("原上传操作及暂存副本尚未只读对账，不得新建第二个暂存会话");
+            if (Object.values(ledger).some(record => record?.stagingPath === stagingPath)) {
+                throw new Error("另一个文件仍在等待上传核对，请稍后重试此文件。");
+            }
             const local = (this.store as any).settings.local;
             ledger[path] = {
                 operationId: operation.id,
@@ -6252,9 +6427,15 @@ export class OneDriveSyncService {
                 path, data, appRelative, expectedRemote, operation,
                 appRelative ? undefined : path, beforeGraphDispatch, expectedLocal?.mtime,
             );
+            if (!appRelative && finalUploaded?.id && (finalUploaded.eTag || finalUploaded.etag)) {
+                await this.setUploadPhase(path, "FINAL_PUT_ISSUED", {
+                    contentAcknowledgedId: finalUploaded.id,
+                    contentAcknowledgedEtag: finalUploaded.eTag || finalUploaded.etag,
+                });
+            }
             if (expectedLocal) {
                 finalUploaded = await this.setUploadedModificationTime(
-                    finalUploaded, expectedLocal.mtime, operation, beforeGraphDispatch,
+                    finalUploaded, expectedLocal.mtime, data, operation, beforeGraphDispatch,
                 );
             }
             if (!appRelative) {
@@ -6835,8 +7016,10 @@ export class OneDriveSyncService {
         // 404 after conditional DELETE is not proof of our own successful commit.
         // Keep the old baseline and pending record until independent reconciliation.
         if (!response.ok) {
-            throw new Error(await this.fetchError(response,
+            const error = new Error(await this.fetchError(response,
                 "OneDrive删除未获确认（含404），保留旧基线等待只读对账"));
+            if ([401, 403, 507].includes(response.status)) Object.assign(error, { status: response.status });
+            throw error;
         }
     }
 
