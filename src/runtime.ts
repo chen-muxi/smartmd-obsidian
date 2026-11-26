@@ -682,6 +682,13 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
     display(): void {
         const { containerEl } = this;
+        const pendingDetails = this.activePage === "onedrive"
+            ? containerEl.querySelector<HTMLDetailsElement>(".smartmd-onedrive-pending-files")
+            : null;
+        const filesOpen = pendingDetails?.open ?? false;
+        const filesFocused = pendingDetails?.querySelector("summary") === containerEl.ownerDocument.activeElement;
+        const scrollContainer = pendingDetails?.closest(".vertical-tab-content");
+        const scrollTop = scrollContainer?.scrollTop;
         this.refreshAiTest = undefined;
         containerEl.empty();
         containerEl.addClass("smartmd-settings");
@@ -691,7 +698,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const content = containerEl.createDiv({ cls: "smartmd-settings-content" });
         if (this.activePage === "home") this.homeSection(content);
         else if (this.activePage === "publish") this.publishSection(content);
-        else if (this.activePage === "onedrive" && this.runtime.supportsOneDrive) this.oneDriveSection(content);
+        else if (this.activePage === "onedrive" && this.runtime.supportsOneDrive) this.oneDriveSection(content, filesOpen);
         else if (this.activePage === "external" && this.runtime.supportsExternalFolderSync) this.externalSection(content);
         else if (this.activePage === "ai") this.aiSection(content);
         else if (this.activePage === "about") this.aboutSection(content);
@@ -700,6 +707,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             this.homeSection(content);
         }
         this.stateSignature = this.currentStateSignature();
+        if (filesFocused) containerEl.querySelector<HTMLElement>(".smartmd-onedrive-pending-files summary")
+            ?.focus({ preventScroll: true });
+        if (scrollContainer && scrollTop !== undefined) scrollContainer.scrollTop = scrollTop;
     }
 
     private currentStateSignature(): string {
@@ -716,6 +726,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 local.oneDrive.onStartup,
                 local.oneDrive.afterSave,
                 local.oneDrive.intervalMinutes,
+                Object.keys(local.oneDrive.pendingUploadOperations || {}),
                 this.runtime.oneDrive.getPendingOneDriveIncomingSharedSettings()?.expiresAt || 0,
                 this.runtime.oneDrive.isBusy(),
             ],
@@ -1002,8 +1013,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         spaceSetting.addButton((button) => button.setButtonText(localize("管理")).setCta().onClick(() => this.runtime.publish.openManager()));
     }
 
-    private oneDriveSection(container: HTMLElement): void {
+    private oneDriveSection(container: HTMLElement, filesOpen: boolean): void {
         const settings = this.runtime.oneDrive.settings();
+        const pendingUploads = Object.keys(settings.pendingUploadOperations || {});
         const autoMode = settings.enabled ? settings.autoMode || "custom" : "manual";
         const intervalMinutes = Number(settings.intervalMinutes || 0);
         const nextCheckAt = settings.enabled && intervalMinutes > 0 && settings.lastSuccessAt
@@ -1186,14 +1198,14 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         // but deliberately has no "release", "retry" or "delete" button.
         const pendingUnknown = Object.entries(settings.pendingUploadOperations || {})
             .filter(([, record]: [string, any]) => record && this.runtime.oneDrive.canAuditUnknownUpload(record));
-        if (Object.keys(settings.pendingUploadOperations || {}).length && this.runtime.oneDrive.canStartManualSync()) {
-            const entries = Object.keys(settings.pendingUploadOperations || {});
+        if (pendingUploads.length && this.runtime.oneDrive.canStartManualSync()) {
             const info = new Setting(container)
-                .setName(localize("有 {0} 个文件等待核对上传结果", entries.length))
-                .setDesc(localize("其他文件照常同步。每次同步会自动检查这些文件。"));
-            const details = info.descEl.createEl("details");
+                .setName(localize("有 {0} 个文件的上传尚未确认", pendingUploads.length))
+                .setDesc(localize("SmartMD 会在同步时向 OneDrive 核对这些文件。点「立即同步」可马上再查。其他文件照常同步。"));
+            const details = info.descEl.createEl("details", { cls: "smartmd-onedrive-pending-files" });
+            details.open = filesOpen;
             details.createEl("summary", { text: localize("查看文件") });
-            for (const path of entries) details.createEl("p", { text: path });
+            for (const path of pendingUploads) details.createEl("p", { text: path });
         } else if (pendingUnknown.length) {
             const section = container.createDiv({ cls: "smartmd-onedrive-unknown-review" });
             new Setting(section).setClass("smartmd-settings-subheading").setName(localize("OneDrive 上次上传结果未明：") + pendingUnknown.length + localize(" 项")).setHeading();
@@ -1533,9 +1545,12 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             const summaryTitle = summaryDiv.createEl("div");
             summaryTitle.addClass("smartmd-sync-summary-title");
 
-            const statusBadge = settings.status === "ready"
-                ? "🟢 全部同步成功"
-                : settings.status === "partial_success"
+            const outcome = summary.outcome ?? (summary.finishedAt <= settings.lastSuccessAt ? "complete"
+                : summary.failed > 0 && summary.success > 0 ? "partial" : "incomplete");
+            const pendingCount = summary.pendingUploads ?? pendingUploads.length;
+            const statusBadge = outcome === "complete"
+                ? (pendingCount ? "🟡 其他文件已同步，有文件待核对" : "🟢 全部同步成功")
+                : outcome === "partial"
                     ? "🟡 部分同步完成 (已隔离失败项)"
                     : "🔴 同步未完成";
             summaryTitle.createSpan({ text: localize("上次同步汇报：{0}", localizeMessage(statusBadge)) });
@@ -1554,6 +1569,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 ["失败", summary.failed, summary.failed > 0 ? "smartmd-sync-count-failed" : undefined],
                 ["未变更", summary.unchanged],
             ];
+            if (pendingCount) counts.push(["待核对", pendingCount]);
             for (const [label, count, cls] of counts) {
                 const item = statsRow.createSpan({ text: localize(label) + ": ", cls });
                 item.createEl("b", { text: String(count) });

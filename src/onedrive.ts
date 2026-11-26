@@ -3249,6 +3249,7 @@ export class OneDriveSyncService {
             let deletionPaused = 0;
             let successCount = 0;
             let unchangedCount = 0;
+            let pendingUploadCount = 0;
             const startTime = Date.now();
             const failedDiagnostics: SyncFailureDiagnostic[] = [];
 
@@ -3278,6 +3279,7 @@ export class OneDriveSyncService {
                     if (old) next[path] = old;
                     delete settings.pendingDeletions[path];
                     skippedPaths.add(path);
+                    pendingUploadCount++;
                     continue;
                 }
                 if (Boolean(localItem) === Boolean(remoteItem)) delete settings.pendingDeletions[path];
@@ -3581,8 +3583,10 @@ export class OneDriveSyncService {
                     } else {
                         delete next[path];
                     }
-                    if (pendingUpload) skippedPaths.add(path);
-                    else failedDiagnostics.push(this.parseFileErrorToDiagnostic(path, fileError, localItem ? "UPLOAD" : "DOWNLOAD"));
+                    if (pendingUpload) {
+                        skippedPaths.add(path);
+                        pendingUploadCount++;
+                    } else failedDiagnostics.push(this.parseFileErrorToDiagnostic(path, fileError, localItem ? "UPLOAD" : "DOWNLOAD"));
                 }
             }
 
@@ -3591,20 +3595,25 @@ export class OneDriveSyncService {
 
             const durationMs = Date.now() - startTime;
             const failedCount = failedDiagnostics.length;
-            settings.lastSyncSummary = {
+            const pendingUploads = Object.keys(settings.pendingUploadOperations || {}).length;
+            const summary: SyncSummary = {
                 total: allPaths.size,
                 processed: processingIndex,
                 success: successCount,
                 failed: failedCount,
                 unchanged: unchangedCount,
+                pendingUploads,
+                outcome: "incomplete",
                 conflicts: 0,
                 durationMs,
                 finishedAt: Date.now(),
             };
+            settings.lastSyncSummary = summary;
             settings.failedDiagnostics = failedDiagnostics.slice(0, 50);
 
             if (failedCount > 0) {
                 if (successCount > 0) {
+                    summary.outcome = "partial";
                     settings.fileStates = this.mergePendingUploadBaselines(next);
                     settings.status = "partial_success";
                     settings.lastError = `部分同步完成：${successCount} 项成功，${failedCount} 项失败（已生成排查指引）`;
@@ -3664,17 +3673,23 @@ export class OneDriveSyncService {
                 settings.status = "ready";
                 settings.lastSuccessAt = Date.now();
                 settings.lastError = "";
+                summary.outcome = "complete";
                 reportProgress?.(localize("正在保存同步结果…"));
                 await (this.store as any).save();
             } catch (error) {
+                summary.outcome = "incomplete";
                 settings.firstSyncCompleted = wasFirstCompleted;
                 if (firstMerge) settings.androidFirstMerge = firstMerge;
                 settings.lastSuccessAt = lastConfirmedSuccessAt;
                 throw error;
             }
-            this.statusCallback?.("SmartMD: 已同步");
+            this.statusCallback?.(pendingUploads ? "SmartMD: 有文件待核对" : "SmartMD: 已同步");
             if (!reportProgress && !silentSuccess) {
-                new Notice(skippedPaths.size ? localize("OneDrive 同步完成，跳过 {0} 个文件", skippedPaths.size) : localize("OneDrive 同步完成"));
+                const otherSkipped = skippedPaths.size - pendingUploadCount;
+                const message = pendingUploads
+                    ? localize("OneDrive 已同步其他文件，{0} 个文件的上传仍待核对。", pendingUploads)
+                    : localize("OneDrive 同步完成");
+                new Notice(otherSkipped ? message + " " + localize("另有 {0} 个文件已跳过。", otherSkipped) : message);
             }
             return true;
 
@@ -3832,6 +3847,14 @@ export class OneDriveSyncService {
                             const updated = await this.setUploadedModificationTime(
                                 { id: mother.id, eTag: mother.etag }, record.sourceMtime, data, operation, timestampGuard);
                             verifiedEtag = updated.eTag || updated.etag;
+                        } catch (error: any) {
+                            timestampGuard();
+                            if (error?.isFatalAuth || [401, 403, 507].includes(Number(error?.status)) || !mother.mtime) {
+                                throw error;
+                            }
+                            // The upload receipt proves this version, even when its
+                            // timestamp can't be restored. Verify it again below.
+                            verifiedMtime = mother.mtime;
                         } finally {
                             this.authority.finishFinal(operation);
                         }

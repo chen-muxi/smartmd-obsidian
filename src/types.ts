@@ -133,6 +133,8 @@ export interface SyncSummary {
     success: number;
     failed: number;
     unchanged: number;
+    pendingUploads?: number;
+    outcome?: "complete" | "partial" | "incomplete";
     /** Saved conflict copies are unresolved, not successful synchronized files. */
     conflicts?: number;
     durationMs: number;
