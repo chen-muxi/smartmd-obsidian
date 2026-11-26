@@ -258,6 +258,20 @@ export interface OneDriveSyncSettings {
     };
 }
 
+export function hasUnfinishedOneDriveSetup(
+    settings: OneDriveSyncSettings, accountId: string, cloudVaultId: string, deviceId: string,
+): boolean {
+    const registration = settings.firstCommitJournal;
+    const firstFile = settings.firstFileJournal;
+    const matchesBinding = (receipt: { accountId: string; cloudVaultId: string; deviceId: string } | undefined) =>
+        settings.firstSyncCompleted && receipt?.accountId === accountId &&
+        receipt.cloudVaultId === cloudVaultId && receipt.deviceId === deviceId;
+    return Boolean(
+        (registration && (registration.stage !== "REGISTERED" || !matchesBinding(registration.identity))) ||
+        (firstFile && (firstFile.stage !== "FILES_COPIED" || !matchesBinding(firstFile))),
+    );
+}
+
 export interface AndroidFirstDownload {
     path: string;
     stagingPath: string;

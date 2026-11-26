@@ -11,6 +11,7 @@ import {
 import { MicrosoftAuth, SmartMDStore } from "./core";
 import {
     SMARTKEEP_PUBLISH_URL,
+    hasUnfinishedOneDriveSetup,
     newId,
     sharedStateForSync,
     SharedSmartMDState,
@@ -681,10 +682,8 @@ export class OneDriveSyncService {
         if (existingLedger && (typeof existingLedger !== "object" || Array.isArray(existingLedger))) {
             throw new Error("历史上传操作记录格式无效，只读恢复不得解除旧锁");
         }
-        // Store.load intentionally revokes the old broad runAllowed permission.
-        // Complete, persisted uploads must nevertheless be able to enter a new
-        // read-only review. Reuse the exact same journal-release guard as sync;
-        // no old write grant is restored and unresolved uploads remain HOLD.
+        // A paused connection may still have a completed upload receipt.
+        // Use the same release guard as sync. Unresolved uploads remain held.
         if (Object.values(existingLedger || {}).some((entry: any) => entry?.phase === "CLEANUP_VERIFIED")) {
             // Set the guard before the first await. A second settings panel or
             // a pre-issued ticket cannot race the baseline or release save.
@@ -891,26 +890,12 @@ export class OneDriveSyncService {
         };
     }
 
-    // Daily sync is a new, session-only user decision, not a continuation of
-    // historical runAllowed. An unresolved or ambiguous item is never batched.
+    // An exceptional pause can be cleared only after checking the current files.
     private eligibleDailySyncEntries(snapshot: ResumedSnapshot): ResumedEntry[] {
         const s = this.settings();
-        const registration = s.firstCommitJournal;
-        const trustedCompletedRegistration = registration?.stage === "REGISTERED"
-            && s.firstSyncCompleted === true
-            && registration.identity?.accountId === snapshot.accountId
-            && registration.identity?.cloudVaultId === snapshot.vaultId
-            && registration.identity?.deviceId === snapshot.deviceId;
-        const firstFile = s.firstFileJournal;
-        const trustedCompletedFirstFile = firstFile?.stage === "FILES_COPIED"
-            && s.firstSyncCompleted === true
-            && firstFile.accountId === snapshot.accountId
-            && firstFile.cloudVaultId === snapshot.vaultId
-            && firstFile.deviceId === snapshot.deviceId;
         if (Object.keys(s.pendingDeletions || {}).length ||
             Object.keys(s.pendingUploadOperations || {}).length ||
-            (registration && !trustedCompletedRegistration) ||
-            (firstFile && !trustedCompletedFirstFile)) {
+            hasUnfinishedOneDriveSetup(s, snapshot.accountId, snapshot.vaultId, snapshot.deviceId)) {
             throw new Error("仍有删除、未知上传或未结算首次提交记录，须逐项结案后才能恢复日常同步");
         }
         const active = snapshot.entries.filter((entry) => !this.isIgnored(entry.path) &&
@@ -982,8 +967,8 @@ export class OneDriveSyncService {
             s.onStartup = false;
             s.afterSave = false;
             s.intervalMinutes = 0;
-            s.status = "paused";
-            s.lastError = "本次启动已重新核对并明确批准普通文件同步；自动模式须再次由用户选择。";
+            s.status = "ready";
+            s.lastError = "";
             await (this.store as any).save();
             if (issued.generation !== this.resumedApprovalGeneration ||
                 issued.expiresAt <= Date.now() || !this.canRun() || this.settings() !== s) {
@@ -3111,6 +3096,7 @@ export class OneDriveSyncService {
         this.dailySyncReviewTickets = new WeakMap();
         this.pendingSharedImport = null;
         settings.status = "stopping";
+        settings.lastError = "";
         if (typeof window !== "undefined") window.clearTimeout(this.saveTimer);
         if (typeof window !== "undefined") window.clearTimeout(this.followUpTimer);
         await (this.store as any).save();

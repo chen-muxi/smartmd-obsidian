@@ -1004,7 +1004,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
     private oneDriveSection(container: HTMLElement): void {
         const settings = this.runtime.oneDrive.settings();
-        const autoMode = String(settings.autoMode || (settings.enabled ? "custom" : "manual"));
+        const autoMode = settings.enabled ? settings.autoMode || "custom" : "manual";
         const intervalMinutes = Number(settings.intervalMinutes || 0);
         const nextCheckAt = settings.enabled && intervalMinutes > 0 && settings.lastSuccessAt
             ? Number(settings.lastSuccessAt) + intervalMinutes * 60 * 1000
@@ -1100,10 +1100,8 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
         if (settings.firstSyncCompleted && settings.confirmed && !this.runtime.oneDrive.canRun()) {
             const section = container.createDiv({ cls: "smartmd-onedrive-resume-review" });
-            new Setting(section).setClass("smartmd-settings-subheading").setName(localize("重启后同步范围必须重新确认")).setHeading();
-            section.createEl("p", { text:
-                localize("已保留历史账号、知识库和已完成文件记录，但旧上传、下载、删除和自动许可全部失效。先核对云端完整清单与本地内容，再确认本轮同步。") });
-            const dailyButton = section.createEl("button", { text: localize("核对后恢复本次日常同步") });
+            new Setting(section).setClass("smartmd-settings-subheading").setName(localize("同步已暂停")).setHeading();
+            const dailyButton = section.createEl("button", { text: localize("检查并恢复同步") });
             dailyButton.onclick = async () => {
                 dailyButton.disabled = true;
                 try {
@@ -1111,7 +1109,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                     const modal = new Modal(this.runtime.app);
                     let submitted = false;
                     modal.onOpen = () => {
-                        modal.titleEl.setText(localize("本次启动：重新授权日常同步"));
+                        modal.titleEl.setText(localize("恢复同步"));
                         modal.contentEl.createEl("p", { text:
                             localize("账号：") + preview.accountId + localize("；本地知识库：") + preview.localVaultId +
                             localize("；云端知识库：") + preview.cloudVaultId + localize("；设备：") + preview.deviceId });
@@ -1134,9 +1132,8 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                                 localize("；云端ETag：") + (e.remoteEtag || localize("无")) + "）" });
                         }
                         modal.contentEl.createEl("p", { text:
-                            localize("批准后只开启本次启动的手动同步，不自动上传。") +
-                            localize("之后可再次单独选择智能或自定义同步；新建普通笔记及合法增量会按所选模式处理。") +
-                            localize("下次重新启动、暂停或改变账号后许可失效，必须再次核对。恢复保护副本不会自动上传。") });
+                            localize("确认后可继续手动同步。") +
+                            localize("恢复后可在同步设置里开启自动同步。") });
                         const cancel = modal.contentEl.createEl("button", { text: localize("取消，继续暂停") });
                         cancel.onclick = () => modal.close();
                         const allow = modal.contentEl.createEl("button", { text: localize("明确确认本次日常同步范围") });
@@ -1147,7 +1144,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                             try {
                                 const permitted = await this.runtime.oneDrive.confirmResumedDailySyncReview(
                                     preview.ticket, true);
-                                if (permitted) new Notice(localize("当前会话手动同步已恢复；自动同步仍关闭，请另行选择模式。"), 7000);
+                                if (permitted) new Notice(localize("手动同步已恢复。"), 7000);
                             } catch (error: any) {
                                 new Notice(localize("日常同步未授权：") + localizeMessage(safeOneDriveError(error)), 8000);
                             } finally {
@@ -1175,7 +1172,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                     const modal = new Modal(this.runtime.app);
                     let chosen = false;
                     modal.onOpen = () => {
-                        modal.titleEl.setText(localize("重启后同步：仅对本次明确批准的单文件操作生效"));
+                        modal.titleEl.setText(localize("检查要同步的文件"));
                         modal.contentEl.createEl("p", { text:
                             localize("账户：") + preview.accountId + localize("；本地库：") + preview.localVaultId +
                             localize("；云库：") + preview.cloudVaultId + localize("；设备：") + preview.deviceId });
@@ -1705,7 +1702,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 .setDisabled(!settings.firstSyncCompleted)
                 .onChange(async (value) => {
                     if (value !== "manual" && !this.runtime.oneDrive.canRun()) {
-                        new Notice(localize("旧同步执行许可已失效：请先重新只读检查文件范围与版本，并单独确认；不能通过切换自动模式恢复许可。"), 8000);
+                        new Notice(localize("请先恢复同步，再开启自动同步。"), 8000);
                         this.display();
                         return;
                     }

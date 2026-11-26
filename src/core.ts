@@ -6,11 +6,12 @@ import { getAndroidVaultRoot } from "./onedrive-android-vault";
 const MICROSOFT_CLIENT_ID = "0ad3b293-4c9e-4d7a-94a3-7043c8bb6248";
 const MICROSOFT_REDIRECT_URI = "obsidian://smartkeep-connect-onedrive";
 const MICROSOFT_SCOPE = "offline_access User.Read Files.ReadWrite.AppFolder";
-import { DEFAULT_SETTINGS, SharedSmartMDState, SmartMDSettings, mergeSettings, newId, sharedStateForSync } from "./types";
+import { DEFAULT_SETTINGS, SharedSmartMDState, SmartMDSettings, hasUnfinishedOneDriveSetup, mergeSettings, newId, sharedStateForSync } from "./types";
 
 const MICROSOFT_SECRET = "obsidian-suite-microsoft-token";
 const AI_SECRET = "obsidian-suite-ai-key";
 const AI_HTTP_SECRET = "obsidian-suite-ai-http-key";
+const LEGACY_ONEDRIVE_RESTART_MESSAGE = "正常重启已保留账号、知识库和历史文件身份；旧同步执行许可失效。必须重新只读核验当前范围并明确批准，才可进行任何上传、下载或删除。";
 
 export function getDevicePlatformName(): string {
     if (Platform.isIosApp) return "iOS";
@@ -113,14 +114,16 @@ export class SmartMDStore {
             this.loadedInThisProcess = true;
             return;
         }
-        if (!this.settings.local.oneDrive.vaultId) {
-            this.settings.local.oneDrive.vaultId = newId("vault");
+        const oneDrive = this.settings.local.oneDrive;
+        const hasExistingScope = Boolean(oneDrive.vaultId && oneDrive.deviceId);
+        if (!oneDrive.vaultId) {
+            oneDrive.vaultId = newId("vault");
         }
-        if (!this.settings.local.oneDrive.deviceId) {
-            this.settings.local.oneDrive.deviceId = newId("device");
+        if (!oneDrive.deviceId) {
+            oneDrive.deviceId = newId("device");
         }
-        if (!this.settings.local.oneDrive.deviceName) {
-            this.settings.local.oneDrive.deviceName = getDevicePlatformName();
+        if (!oneDrive.deviceName) {
+            oneDrive.deviceName = getDevicePlatformName();
         }
         // An Obsidian installation may open multiple Vaults on the SAME PC.
         // Scope this local-only approval to a verified Windows Vault root;
@@ -155,7 +158,6 @@ export class SmartMDStore {
             this.approvedVaultRoot = "";
             this.scopedInstallationKey = "";
         }
-        const oneDrive = this.settings.local.oneDrive;
         if (!localProof || oneDrive.installationProofId !== localProof) {
             // Forensic local-only receipt, never an execution grant. It permits an explicit
             // NEW cloud copy to retain completed historical metadata until final binding.
@@ -178,11 +180,6 @@ export class SmartMDStore {
                 prior: isolatedPrior, isolatedAt: Date.now(),
             };
         } else {
-            // Stable installation/Vault/device identity is not an execution grant.
-            // A new process starts a new permission generation: preserve trusted
-            // fileStates, current binding and unresolved journal for read-only
-            // reconciliation, but never carry old uploads/deletes/auto triggers.
-            const oldExecutionAllowed = oneDrive.runAllowed || oneDrive.enabled;
             const currentScope = [
                 this.settings.local.microsoftAccountId, oneDrive.vaultId,
                 oneDrive.deviceId, oneDrive.installationProofId,
@@ -191,14 +188,43 @@ export class SmartMDStore {
             const identicalLiveScope = previousScope.every(
                 (value, i) => value === currentScope[i],
             );
-            const keepLiveGrant = activeLiveGrant && identicalLiveScope;
-            if (!keepLiveGrant) {
+            const accountId = this.settings.local.microsoftAccountId;
+            const completedBinding = hasExistingScope && oneDrive.firstSyncCompleted && oneDrive.confirmed && accountId &&
+                oneDrive.confirmationAccountId === accountId && oneDrive.confirmationVaultId === oneDrive.vaultId;
+            const uploadRecords = oneDrive.pendingUploadOperations;
+            const unresolvedWrite = hasUnfinishedOneDriveSetup(oneDrive, accountId, oneDrive.vaultId, oneDrive.deviceId) ||
+                oneDrive.androidFirstDownload ||
+                ("pendingSharedUploadOperation" in oneDrive && oneDrive.pendingSharedUploadOperation) ||
+                (uploadRecords && (typeof uploadRecords !== "object" || Array.isArray(uploadRecords) ||
+                    Object.keys(uploadRecords).length > 0));
+            const keepConnection = this.loadedInThisProcess
+                ? activeLiveGrant && identicalLiveScope
+                : completedBinding && oneDrive.status !== "stopping" && !unresolvedWrite;
+            if (!keepConnection) {
                 oneDrive.runAllowed = false;
                 oneDrive.enabled = false;
+            } else if (!this.loadedInThisProcess && !oneDrive.runAllowed && !oneDrive.enabled &&
+                oneDrive.status === "paused" &&
+                oneDrive.lastError === LEGACY_ONEDRIVE_RESTART_MESSAGE) {
+                // The previous version revoked the binding on every restart.
+                // Restore manual sync only: that version cleared the auto toggle.
+                oneDrive.runAllowed = true;
+                oneDrive.status = "ready";
+                oneDrive.lastError = "";
             }
-            if (oldExecutionAllowed && !keepLiveGrant) {
+            if (!this.loadedInThisProcess && (oneDrive.status === "syncing" || oneDrive.status === "stopping")) {
+                // No active operation survives a process restart. A new round
+                // still checks any unresolved upload journal before writing.
+                oneDrive.status = oneDrive.runAllowed ? "ready" : "paused";
+            }
+            if (!this.loadedInThisProcess && oneDrive.runAllowed) {
+                // A new scan can recreate deletion candidates from the saved
+                // baseline. Never present a previous process's delete preview.
+                oneDrive.pendingDeletions = {};
+            }
+            if (!oneDrive.runAllowed) oneDrive.enabled = false;
+            if (!keepConnection && oneDrive.firstSyncCompleted && !oneDrive.lastError) {
                 oneDrive.status = "paused";
-                oneDrive.lastError = "正常重启已保留账号、知识库和历史文件身份；旧同步执行许可失效。必须重新只读核验当前范围并明确批准，才可进行任何上传、下载或删除。";
             }
         }
         oneDrive.installationProofId = localProof;
