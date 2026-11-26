@@ -17,6 +17,13 @@ declare const require: any;
 
 const RECOVERY_PROTECTION_MS = 7 * 24 * 60 * 60 * 1000;
 class RecoveryCapacityError extends Error {}
+class ExternalVersionChangedError extends Error {
+    constructor(message: string, readonly committedContent?: string) {
+        super(message);
+    }
+}
+
+const legacyReadbackFailure = "同步失败，原版本已保留：双端读回版本不一致，已保留备份";
 
 type ScannedFile = {
     relativePath: string;
@@ -1160,7 +1167,9 @@ export class ExternalSyncService {
         }
     }
 
-    private async scanExternal(root: string, filterConfig?: ExternalFilterConfig, metadataOnly = false): Promise<ScannedFile[]> {
+    private async scanExternal(
+        root: string, filterConfig?: ExternalFilterConfig, metadataOnly = false, unstablePaths?: Set<string>,
+    ): Promise<ScannedFile[]> {
         const output: ScannedFile[] = [];
         const walk = async (current: string): Promise<void> => {
             const entries = await this.fs.promises.readdir(current, { withFileTypes: true });
@@ -1180,7 +1189,12 @@ export class ExternalSyncService {
                     if (!FilterMatcher.isFileAccepted(relPath, filterConfig)) {
                         continue;
                     }
-                    const stat = await this.fs.promises.stat(absolutePath);
+                    const stat = await this.fs.promises.stat(absolutePath).catch((error: NodeJS.ErrnoException) => {
+                        if (error.code !== "ENOENT" || !unstablePaths) throw error;
+                        unstablePaths.add(relPath);
+                        return null;
+                    });
+                    if (!stat) continue;
                     if (!stat.isFile()) throw new Error("外部文件类型变化，取消本轮扫描");
                     if (stat.size > 16 * 1024 * 1024) {
                         throw new Error("单篇 Markdown 超过 16MiB 安全扫描上限：" + relPath);
@@ -1227,7 +1241,7 @@ export class ExternalSyncService {
     async syncAll(): Promise<void> {
         if (!Platform.isDesktopApp) return;
         for (const binding of this.bindings()) {
-            if (this.canRun(binding)) await this.syncBinding(binding);
+            if (this.canRun(binding) || this.shouldRetryLegacyReadback(binding)) await this.syncBinding(binding);
         }
     }
 
@@ -1243,7 +1257,27 @@ export class ExternalSyncService {
         }
     }
 
+    private shouldRetryLegacyReadback(binding: any): boolean {
+        return binding.status === "failed"
+            && binding.lastError === legacyReadbackFailure
+            && binding.confirmed === true
+            && binding.runAllowed !== true
+            && !!binding.canonicalExternalPath
+            && Number.isFinite(binding.rootDev) && Number.isFinite(binding.rootIno)
+            && !binding.recoveryInProgress
+            && binding.confirmationScope === `${binding.externalPath}|${binding.targetPath}`;
+    }
+
     private async performSyncBinding(binding: any): Promise<void> {
+        if (Platform.isDesktopApp && this.shouldRetryLegacyReadback(binding)) {
+            try {
+                await this.assertBindingRoot(binding);
+            } catch {
+                return;
+            }
+            if (!this.bindings().includes(binding) || !this.shouldRetryLegacyReadback(binding)) return;
+            this.authority.confirm(binding);
+        }
         if (
             !Platform.isDesktopApp
             || this.running.has(binding.id)
@@ -1253,10 +1287,6 @@ export class ExternalSyncService {
         const partial: Record<string, any> = {};
         this.running.add(binding.id);
         try {
-            binding.status = "syncing";
-            binding.lastError = "";
-            await (this.store as any).save();
-
             // Revalidate persisted rules before any pruning or file reads.
             // An unsafe legacy regex must not silently become "no match" and
             // broaden the set of files eligible for synchronization.
@@ -1286,8 +1316,9 @@ export class ExternalSyncService {
                 return;
             }
             let externalFiles: ScannedFile[];
+            const unstablePaths = new Set<string>();
             try {
-                externalFiles = await this.scanExternal(binding.externalPath, binding.filterConfig, true);
+                externalFiles = await this.scanExternal(binding.externalPath, binding.filterConfig, true, unstablePaths);
                 const completedRoot = await this.fs.promises.stat(binding.externalPath);
                 if (!completedRoot.isDirectory()) throw new Error("外部同步根目录不可用");
             } catch (error) {
@@ -1302,17 +1333,18 @@ export class ExternalSyncService {
             const external = new Map(externalFiles.map((item) => [item.relativePath, item]));
             const vault = await this.scanVault(binding, true);
             const previous = binding.fileStates || {};
-            const allPaths = new Set([...external.keys(), ...vault.keys(), ...Object.keys(previous)]);
+            const allPaths = new Set([...external.keys(), ...vault.keys(), ...Object.keys(previous), ...unstablePaths]);
             const next: Record<string, any> = partial;
             binding.pendingCount = allPaths.size;
             let protectedDeletes = 0;
             let blockedByCapacity = 0;
             let filesChangedDuringScan = 0;
+            let copiedFiles = 0;
 
             // 防误删风暴小样本与全量抹除熔断机制 (Circuit Breaker)
             const baselinePaths = Object.keys(previous).filter((p) => previous[p]?.externalHash);
             const totalBaseline = baselinePaths.length;
-            const missingCount = baselinePaths.filter((p) => !external.has(p)).length;
+            const missingCount = baselinePaths.filter((p) => !external.has(p) && !unstablePaths.has(p)).length;
             const isStorm = missingCount > 5 || (totalBaseline >= 2 && missingCount === totalBaseline) || (totalBaseline >= 5 && (missingCount / totalBaseline) > 0.2);
             if (isStorm) {
                 await this.authority.stop(binding);
@@ -1326,17 +1358,14 @@ export class ExternalSyncService {
             for (const relativePath of [...allPaths].sort()) {
                 if (!this.isCurrent(binding, ticket)) return;
                 const waitingConflict = (binding.conflicts || []).find((item: any) => item.relativePath === relativePath);
-                if (waitingConflict) {
-                    const latest = await this.currentPair(binding, relativePath);
-                    if (!latest.external || !latest.vault || !this.conflictMatches(waitingConflict, latest)) {
-                        if (previous[relativePath]) next[relativePath] = previous[relativePath];
-                        filesChangedDuringScan++;
-                        continue;
-                    }
-                }
                 const ext = external.get(relativePath);
                 const local = vault.get(relativePath);
                 const old = previous[relativePath];
+                if (unstablePaths.has(relativePath)) {
+                    if (old) next[relativePath] = old;
+                    filesChangedDuringScan++;
+                    continue;
+                }
 
                 // Quick stat-based skip MUST happen before any content read or hashing.
                 if (!waitingConflict && ext && local && old && old.externalHash && old.vaultHash && old.externalHash === old.vaultHash) {
@@ -1359,51 +1388,38 @@ export class ExternalSyncService {
                         continue;
                     }
                 }
-                // A source changed after the metadata snapshot: never adopt
-                // its new bytes as though the original scan had observed them.
-                if (ext) {
-                    const beforeRead = await this.fs.promises.stat(ext.absolutePath);
-                    if (Math.floor(beforeRead.mtimeMs) !== ext.mtimeMs || beforeRead.size !== ext.size) {
-                        const latest = await this.currentPair(binding, relativePath);
-                        if (latest.external && latest.vault &&
-                            latest.external.hash !== latest.vault.hash) {
-                            binding.conflicts.push(await this.makeConflict(
-                                binding, relativePath, latest.external.content, latest.vault.content, ticket,
-                            ));
-                            binding.status = "conflict";
-                        }
-                        if (old) next[relativePath] = old;
-                        binding.pendingCount = Math.max(0, binding.pendingCount - 1);
-                        continue;
-                    }
-                    ext.content = await this.readExternalMarkdown(ext.absolutePath);
-                    ext.hash = await digest(ext.content);
-                }
-                if (local) {
-                    local.content = await this.app.vault.cachedRead(local.file);
-                    local.hash = await digest(local.content);
-                }
-                const fresh = await this.currentPair(binding, relativePath);
-                if (!this.isCurrent(binding, ticket)) return;
-                if (!this.samePair(ext, local, fresh)) {
-                    if (old) next[relativePath] = old;
-                    filesChangedDuringScan++;
-                    continue;
-                }
+                let appliedHash: string | undefined;
                 try {
+                    if (ext) {
+                        const beforeRead = await this.fs.promises.stat(ext.absolutePath).catch(this.externalObservationError);
+                        if (Math.floor(beforeRead.mtimeMs) !== ext.mtimeMs || beforeRead.size !== ext.size) {
+                            throw new ExternalVersionChangedError("外部文件在扫描期间发生变化");
+                        }
+                        ext.content = await this.readExternalMarkdown(ext.absolutePath).catch(this.externalObservationError);
+                        ext.hash = await digest(ext.content);
+                    }
+                    if (local) {
+                        local.content = await this.app.vault.read(local.file).catch(this.externalObservationError);
+                        local.hash = await digest(local.content);
+                    }
+                    const fresh = await this.currentPair(binding, relativePath);
+                    if (!this.isCurrent(binding, ticket)) return;
+                    if (!this.samePair(ext, local, fresh)) {
+                        throw new ExternalVersionChangedError("文件在扫描期间发生变化");
+                    }
                     if (ext && local) {
                         let winnerHash = ext.hash;
                         if (ext.hash !== local.hash) {
                             const externalChanged = !old || old.externalHash !== ext.hash;
                             const vaultChanged = !old || old.vaultHash !== local.hash;
-                            const externalWins = waitingConflict || externalChanged === vaultChanged
+                            const externalWins = externalChanged === vaultChanged
                                 ? Number(ext.mtimeMs || 0) >= Number(local.mtime || 0)
                                 : externalChanged;
                             const validate = async () => {
-                            const latest = await this.currentPair(binding, relativePath);
-                            return this.samePair(ext, local, latest) && latest.external?.mtimeMs === ext.mtimeMs &&
-                                latest.vault?.file.stat.mtime === local.mtime;
-                        };
+                                const latest = await this.currentPair(binding, relativePath);
+                                return this.samePair(ext, local, latest) && latest.external?.mtimeMs === ext.mtimeMs &&
+                                    latest.vault?.file.stat.mtime === local.mtime;
+                            };
                             if (externalWins) {
                                 await this.stageVaultWrite(binding, relativePath, ext.content, ticket, validate);
                             } else {
@@ -1411,11 +1427,13 @@ export class ExternalSyncService {
                                 await this.atomicWrite(ext.absolutePath, local.content, () => this.isCurrent(binding, ticket),
                                     validate, () => this.authority.beginFinal(ticket), { binding, relativePath });
                             }
+                            appliedHash = winnerHash;
                         }
-                        const verified = await this.currentPair(binding, relativePath);
+                        const verified = appliedHash ? await this.currentPair(binding, relativePath) : fresh;
                         if (verified.external?.hash !== winnerHash || verified.vault?.hash !== winnerHash) {
-                            throw new Error("双端读回版本不一致，已保留备份");
+                            throw new ExternalVersionChangedError("文件在同步后再次发生变化");
                         }
+                        if (appliedHash) copiedFiles++;
                         next[relativePath] = { externalHash: winnerHash, vaultHash: winnerHash,
                             externalMtimeMs: verified.external.mtimeMs, externalSize: verified.external.size,
                             vaultMtime: verified.vault.file.stat.mtime, vaultSize: verified.vault.file.stat.size };
@@ -1450,6 +1468,7 @@ export class ExternalSyncService {
                                 ticket,
                                 async () => this.samePair(ext, local, await this.currentPair(binding, relativePath)),
                             );
+                            copiedFiles++;
                             next[relativePath] = {
                                 externalHash: ext.hash,
                                 vaultHash: ext.hash,
@@ -1490,9 +1509,22 @@ export class ExternalSyncService {
                         }
                     }
                 } catch (error) {
-                    if (!(error instanceof RecoveryCapacityError)) throw error;
-                    if (old) next[relativePath] = old;
-                    blockedByCapacity++;
+                    if (error instanceof ExternalVersionChangedError) {
+                        await this.assertBindingRoot(binding);
+                        const committedHash = appliedHash ?? (error.committedContent === undefined
+                            ? undefined : await digest(error.committedContent));
+                        if (committedHash && ext && local) {
+                            // Compare later edits to the committed version, independent of
+                            // the timestamp assigned by SmartMD's own replacement.
+                            next[relativePath] = { externalHash: committedHash, vaultHash: committedHash };
+                        }
+                        filesChangedDuringScan++;
+                    } else if (error instanceof RecoveryCapacityError) {
+                        blockedByCapacity++;
+                    } else {
+                        throw error;
+                    }
+                    if (!next[relativePath] && old) next[relativePath] = old;
                     continue;
                 }
                 if (next[relativePath] && next[relativePath] !== old) {
@@ -1504,9 +1536,10 @@ export class ExternalSyncService {
             }
             if (!this.isCurrent(binding, ticket)) return;
             binding.fileStates = next;
-            if (!blockedByCapacity && !filesChangedDuringScan) binding.lastSuccessAt = Date.now();
+            binding.pendingCount = blockedByCapacity + filesChangedDuringScan;
+            if (copiedFiles || (!binding.lastSuccessAt && !binding.pendingCount)) binding.lastSuccessAt = Date.now();
             binding.lastError = blockedByCapacity ? localize("恢复区已满，已跳过 {0} 个需要备份的文件。", blockedByCapacity)
-                : filesChangedDuringScan ? localize("有 {0} 个文件的版本尚未核实，已保留现有文件。", filesChangedDuringScan)
+                : filesChangedDuringScan ? localize("有 {0} 个文件在同步时发生了变化，会自动重试。", filesChangedDuringScan)
                 : protectedDeletes
                 ? `${protectedDeletes} 项外部删除已停在恢复保护边界，知识库与 OneDrive 内容均未删除。`
                 : "";
@@ -2534,6 +2567,11 @@ export class ExternalSyncService {
         }
     }
 
+    private externalObservationError(error: NodeJS.ErrnoException): never {
+        if (error.code === "ENOENT") throw new ExternalVersionChangedError("文件在读取期间被移动或替换");
+        throw error;
+    }
+
     private async currentPair(binding: any, relativePath: string): Promise<{
         external: ScannedFile | null;
         vault: { file: TFile; content: string; hash: string } | null;
@@ -2551,7 +2589,7 @@ export class ExternalSyncService {
             absolutePath,
             content: externalContent,
             hash: await digest(externalContent),
-            ...await this.fs.promises.stat(absolutePath).then((stat: any) => ({ mtimeMs: Math.floor(stat.mtimeMs), size: stat.size })),
+            ...await this.fs.promises.stat(absolutePath).then((stat: any) => ({ mtimeMs: Math.floor(stat.mtimeMs), size: stat.size })).catch(this.externalObservationError),
         };
         const vaultPath = normalizePath(`${binding.targetPath}/${relativePath}`);
         const file = this.app.vault.getAbstractFileByPath(vaultPath);
@@ -2560,7 +2598,7 @@ export class ExternalSyncService {
                 file,
                 content,
                 hash: await digest(content),
-            }))
+            })).catch(this.externalObservationError)
             : null;
         return { external, vault };
     }
@@ -2638,11 +2676,12 @@ export class ExternalSyncService {
                 if (error?.code !== "EEXIST") temporaryMayBeOurs = true;
                 throw error;
             }
-            if (!permit() || !(await validate())) {
-                throw new Error("最终复核未通过，暂存内容未进入正式文件");
+            if (!permit()) throw new Error("同步已停止，暂存内容未进入正式文件");
+            if (!(await validate())) {
+                throw new ExternalVersionChangedError("文件在正式写入前发生变化");
             }
             if (await readOriginal() !== original) {
-                throw new Error("目标文件在准备写入期间变化，拒绝覆盖");
+                throw new ExternalVersionChangedError("目标文件在准备写入期间变化，拒绝覆盖");
             }
             let backup: any;
             let expectedHash = "";
@@ -2651,8 +2690,9 @@ export class ExternalSyncService {
                 backup = await this.createRecovery(backupContext.binding, backupContext.relativePath, original, "external", true);
                 expectedHash = await digest(original);
             }
-            if (!permit() || !(await validate()) || await readOriginal() !== original) {
-                throw new Error("正式提交前原文件又发生变化，保留原件并撤销写入");
+            if (!permit()) throw new Error("同步已停止，暂存内容未进入正式文件");
+            if (!(await validate()) || await readOriginal() !== original) {
+                throw new ExternalVersionChangedError("正式提交前原文件又发生变化，保留原件并撤销写入");
             }
             enterFinal();
             if (original !== null) {
@@ -2680,10 +2720,14 @@ export class ExternalSyncService {
                 // Unsupported filesystems fail closed instead of using unsafe copy.
                 await this.fs.promises.link(temporary, destination);
             }
-            if (await this.fs.promises.readFile(destination, "utf8") !== content) {
-                throw new Error("提交后读回校验失败，保留备份等待人工核查");
-            }
             if (backup) backup.replacedAt = Date.now();
+            const committed = await this.fs.promises.readFile(destination, "utf8").catch((error: NodeJS.ErrnoException) => {
+                if (error.code === "ENOENT") throw new ExternalVersionChangedError("同步后外部文件被移走", content);
+                throw error;
+            });
+            if (committed !== content) {
+                throw new ExternalVersionChangedError("提交后外部文件再次发生变化", content);
+            }
         } finally {
             if (temporaryMayBeOurs) {
                 try {
@@ -2712,7 +2756,7 @@ export class ExternalSyncService {
             await this.app.vault.create(stagingPath, content);
             this.authority.require(ticket);
             if (!this.knownBindings().includes(binding)) throw new Error("同步项已解除绑定，暂存内容未落地");
-            if (!(await validate())) throw new Error("最终复核发现双方再次变化，暂存内容未落地");
+            if (!(await validate())) throw new ExternalVersionChangedError("最终复核发现双方再次变化，暂存内容未落地");
             if (!this.isCurrent(binding, ticket)) throw new Error("同步身份或范围已变化，暂存内容未落地");
             const vaultPath = normalizePath(`${binding.targetPath}/${relativePath}`);
             const current = this.app.vault.getAbstractFileByPath(vaultPath);
@@ -2722,13 +2766,13 @@ export class ExternalSyncService {
                 const currentContent = await this.app.vault.read(current);
                 backup = await this.createRecovery(binding, relativePath, currentContent, "vault", true);
                 if (!(await validate()) || await this.app.vault.read(current) !== currentContent) {
-                    throw new Error("知识库原稿在备份之后发生变化，拒绝覆盖");
+                    throw new ExternalVersionChangedError("知识库原稿在备份之后发生变化，拒绝覆盖");
                 }
                 this.authority.beginFinal(ticket);
                 await this.app.vault.process(current, latest => {
                     if (!this.isCurrent(binding, ticket) || latest !== currentContent ||
                         this.app.vault.getAbstractFileByPath(vaultPath) !== current) {
-                        throw new Error("知识库原稿在备份之后发生变化，拒绝覆盖");
+                        throw new ExternalVersionChangedError("知识库原稿在备份之后发生变化，拒绝覆盖");
                     }
                     return content;
                 });
@@ -2746,7 +2790,7 @@ export class ExternalSyncService {
                     this.pathKey(await this.fs.promises.realpath(parent)) !== this.pathKey(parent)) {
                     throw new Error("无法核实Windows物理根");
                 }
-                if (!(await validate())) throw new Error("最终复核发现双方再次变化，暂存内容未落地");
+                if (!(await validate())) throw new ExternalVersionChangedError("最终复核发现双方再次变化，暂存内容未落地");
                 this.authority.beginFinal(ticket);
                 await this.fs.promises.link(staged, destination);
                 // The desktop Vault may index the exclusive create asynchronously.
@@ -2754,11 +2798,16 @@ export class ExternalSyncService {
                     await new Promise(resolve => setTimeout(resolve, 25));
                 }
             }
-            const landed = this.app.vault.getAbstractFileByPath(vaultPath);
-            if (!(landed instanceof TFile) || await this.app.vault.read(landed) !== content) {
-                throw new Error("知识库提交后读回版本不符，已保留恢复档案");
-            }
             if (backup) backup.replacedAt = Date.now();
+            const landed = this.app.vault.getAbstractFileByPath(vaultPath);
+            if (!(landed instanceof TFile)) throw new Error("知识库提交后无法找到目标文件");
+            const committed = await this.app.vault.read(landed).catch((error: NodeJS.ErrnoException) => {
+                if (error.code === "ENOENT") throw new ExternalVersionChangedError("同步后知识库文件被移走", content);
+                throw error;
+            });
+            if (committed !== content) {
+                throw new ExternalVersionChangedError("提交后知识库文件再次发生变化", content);
+            }
         } finally {
             // 落实 BL-EXT-009 与终审要求：在 finally 块中强制底层物理销毁暂存文件
             await this.removeCommittedExternalStage(stagingPath);

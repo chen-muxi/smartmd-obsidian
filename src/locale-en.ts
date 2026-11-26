@@ -1533,7 +1533,7 @@ export const englishMessages: Readonly<Record<string, string>> = {
     "请在恢复区继续上次未完成的恢复。": "Open the recovery area to finish the previous restore.",
     "外部替换需要核对，原始字节保留在：{0}": "The external file changed during replacement. Its previous contents are saved at: {0}",
     "恢复区已满，已跳过 {0} 个需要备份的文件。": "The recovery area is full. Files skipped because they need a backup: {0}.",
-    "有 {0} 个文件的版本尚未核实，已保留现有文件。": "Versions still to verify: {0}. The existing files were kept.",
+    "有 {0} 个文件在同步时发生了变化，会自动重试。": "{0} files changed during sync. SmartMD will retry automatically.",
     "恢复“{0}”到两端原位置？现有版本会先保存到恢复区。": "Restore “{0}” to its original location on both sides? The current copies are backed up first.",
     "恢复未完整完成，已暂停同步并保留两端备份。": "Restore is incomplete. Sync was paused and both backups were kept.",
     "打开恢复区": "Open recovery area",

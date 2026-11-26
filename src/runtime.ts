@@ -654,12 +654,15 @@ export class SmartMDSettingsTab extends PluginSettingTab {
     private aiTestTarget?: { aiApiUrl: string; aiModel: string };
     private aiTestMessage = "";
     private refreshAiTest?: () => void;
+    private externalRows = new Map<string, { status: HTMLElement; success: HTMLElement; error: HTMLElement; toggle: HTMLButtonElement }>();
     private aiAddressShown?: string;
     private aiModelShown?: string;
 
     constructor(app: App, plugin: Plugin, private runtime: SmartMDRuntime) {
         super(app, plugin);
-        this.runtime.oneDrive.setStatusListener(() => this.scheduleDisplay());
+        this.runtime.oneDrive.setStatusListener(() => {
+            if (this.activePage === "home" || this.activePage === "onedrive") this.scheduleDisplay();
+        });
         const unsubscribe = this.runtime.store.subscribe(() => {
             const current = this.runtime.store.settings.shared;
             const target = this.aiTestTarget;
@@ -669,6 +672,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             }
             const next = this.currentStateSignature();
             if (next !== this.stateSignature || refreshAi) this.scheduleDisplay();
+            else if (this.activePage === "external" && this.containerEl.isConnected) {
+                for (const binding of this.runtime.external?.bindings() || []) this.updateExternalRow(binding);
+            }
         });
         (plugin as any).register?.(unsubscribe);
     }
@@ -693,6 +699,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const scrollContainer = (pendingDetails ?? recoveryDetails)?.closest(".vertical-tab-content");
         const scrollTop = scrollContainer?.scrollTop;
         this.refreshAiTest = undefined;
+        this.externalRows.clear();
         containerEl.empty();
         containerEl.addClass("smartmd-settings");
         this.renderHeader(containerEl);
@@ -718,7 +725,15 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
     private currentStateSignature(): string {
         const local = (this.runtime.store as any).settings.local;
+        if (this.activePage === "external") {
+            return JSON.stringify([
+                local.interfaceLanguage,
+                (this.runtime.external?.bindings() || []).map(binding => [binding.id, binding.nickname, binding.externalPath]),
+                (this.runtime.external?.recoveryArchives() || []).map(archive => [archive.id, archive.nickname]),
+            ]);
+        }
         return JSON.stringify({
+            externalBindingCount: this.activePage === "home" ? this.runtime.external?.bindings().length : undefined,
             smartkeep: [local.smartkeepAccountId, this.runtime.isSmartKeepSignedIn()],
             microsoft: [local.microsoftAccountId, this.runtime.isMicrosoftSignedIn(), this.runtime.isMicrosoftSignInPending()],
             oneDrive: [
@@ -741,21 +756,6 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 space.statusMessage,
                 space.cloudVersion,
             ]),
-            external: [
-                ...(this.runtime.external?.bindings() || []).map((binding: any) => [
-                    binding.id,
-                    binding.status,
-                    binding.pendingCount,
-                    binding.lastError,
-                    (binding.conflicts || []).length,
-                    (binding.recoveryItems || []).length,
-                ]),
-                ...(this.runtime.external?.recoveryArchives() || []).map((archive: any) => [
-                    archive.id,
-                    (archive.recoveryItems || []).length,
-                    archive.lastError,
-                ]),
-            ],
         });
     }
 
@@ -1723,28 +1723,25 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             };
             actions.createEl("button", { text: localize("立即同步") }).onclick = async () => {
                 await this.runtime.external?.syncBinding(binding);
-                this.display();
+                this.updateExternalRow(binding);
             };
             actions.createEl("button", { text: localize("⚙️ 筛选规则") }).onclick = () => {
                 this.runtime.external?.openFilterModal(binding, () => this.display());
             };
             actions.createEl("button", { text: localize("打开恢复区") }).onclick = () => this.runtime.external?.openRecovery(binding.id);
-            const isActive = binding.status === "active";
-            actions.createEl("button", { text: isActive ? localize("暂停") : localize("恢复同步") }).onclick = async () => {
-                if (isActive) await this.runtime.external?.pause(binding.id);
+            const toggle = actions.createEl("button");
+            toggle.onclick = async () => {
+                if (binding.runAllowed) await this.runtime.external?.pause(binding.id);
                 else await this.runtime.external?.resume(binding.id);
-                this.display();
+                this.updateExternalRow(binding);
             };
-            const filterSummary = binding.filterConfig?.mode === "include"
-                ? `白名单 (${(binding.filterConfig.userRules || []).length}条规则)`
-                : `排除模式 (${(binding.filterConfig?.userRules || []).length}条规则)`;
-            item.createEl("p", {
-                cls: "setting-item-description smartmd-external-inline-status",
-                text: localize("{0} · 筛选: {1}", localizeMessage(this.runtime.external?.statusLabel(binding.status)), localizeMessage(filterSummary)),
+            this.externalRows.set(binding.id, {
+                toggle,
+                status: item.createEl("p", { cls: "setting-item-description smartmd-external-inline-status" }),
+                success: item.createEl("p", { cls: "setting-item-description" }),
+                error: item.createEl("p", { cls: "setting-item-description" }),
             });
-            if (binding.lastSuccessAt) item.createEl("p", { cls: "setting-item-description",
-                text: localize("上次成功：{0}", new Date(binding.lastSuccessAt).toLocaleString()) });
-            if (binding.lastError) item.createEl("p", { cls: "setting-item-description", text: localizeMessage(binding.lastError) });
+            this.updateExternalRow(binding);
         }
         const archives = this.runtime.external?.recoveryArchives() || [];
         if (archives.length) {
@@ -1753,6 +1750,24 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 new Setting(container).setName(archive.nickname).addButton(button => button
                     .setButtonText(localize("打开恢复区")).onClick(() => this.runtime.external?.openRecovery(archive.id)));
             }
+        }
+    }
+
+    private updateExternalRow(binding: any): void {
+        const row = this.externalRows.get(binding.id);
+        if (!row) return;
+        const filter = binding.filterConfig;
+        const rules = (filter?.userRules || []).length;
+        const filterSummary = filter?.mode === "include" ? `白名单 (${rules}条规则)` : `排除模式 (${rules}条规则)`;
+        const status = localize("{0} · 筛选: {1}", localizeMessage(this.runtime.external?.statusLabel(binding.status)), localizeMessage(filterSummary));
+        const success = binding.lastSuccessAt
+            ? localize("上次成功：{0}", new Date(binding.lastSuccessAt).toLocaleString())
+            : "";
+        const error = localizeMessage(binding.lastError || "");
+        const toggle = binding.runAllowed ? localize("暂停") : localize("恢复同步");
+        for (const [element, text] of [[row.status, status], [row.success, success], [row.error, error], [row.toggle, toggle]] as const) {
+            if (element.textContent !== text) element.textContent = text;
+            if (element.hidden !== !text) element.hidden = !text;
         }
     }
 
