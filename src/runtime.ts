@@ -110,7 +110,7 @@ export class SmartMDRuntime {
     }
 
     async syncOneDriveFromShortcut(): Promise<void> {
-        if (Platform.isAndroidApp && !this.oneDrive.settings().firstSyncCompleted) {
+        if (!this.oneDrive.settings().firstSyncCompleted) {
             this.openSettingsTab("onedrive");
             return;
         }
@@ -1012,8 +1012,8 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         let statusDescription = nextCheckAt
             ? localize("{0}；下次检查：{1}", localizeMessage(this.runtime.oneDrive.statusText()), new Date(Math.max(Date.now(), nextCheckAt)).toLocaleString())
             : localizeMessage(this.runtime.oneDrive.statusText());
-        if (Platform.isAndroidApp && !settings.firstSyncCompleted && !this.runtime.oneDrive.isBusy()) {
-            statusDescription += " " + localize("第一次使用时，点「开始同步」可能会在 OneDrive 创建 SmartMD 文件夹。");
+        if (!settings.firstSyncCompleted && !this.runtime.oneDrive.isBusy()) {
+            statusDescription += " " + localize("第一次使用时，OneDrive 可能会创建 SmartMD 文件夹。");
         }
         new Setting(container).setClass("smartmd-settings-section-title").setName(localize("OneDrive 多设备同步")).setHeading();
         container.createEl("p", { text: Platform.isAndroidApp
@@ -1034,7 +1034,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 const busy = this.runtime.oneDrive.isBusy();
                 button
                     .setButtonText(localizeMessage(this.runtime.oneDrive.actionLabel()))
-                    .setDisabled(busy || (settings.firstSyncCompleted && !this.runtime.oneDrive.canRun()))
+                    .setDisabled(busy || !this.runtime.oneDrive.canStartManualSync())
                     .setCta()
                     .onClick(async () => {
                         if (this.runtime.oneDrive.isBusy()) return;
@@ -1098,72 +1098,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             };
         }
 
-        if (settings.firstSyncCompleted && settings.confirmed && !this.runtime.oneDrive.canRun()) {
+        if (settings.firstSyncCompleted && settings.confirmed && !this.runtime.oneDrive.canStartManualSync()) {
             const section = container.createDiv({ cls: "smartmd-onedrive-resume-review" });
             new Setting(section).setClass("smartmd-settings-subheading").setName(localize("同步已暂停")).setHeading();
-            const dailyButton = section.createEl("button", { text: localize("检查并恢复同步") });
-            dailyButton.onclick = async () => {
-                dailyButton.disabled = true;
-                try {
-                    const preview = await this.runtime.oneDrive.prepareResumedDailySyncReview();
-                    const modal = new Modal(this.runtime.app);
-                    let submitted = false;
-                    modal.onOpen = () => {
-                        modal.titleEl.setText(localize("恢复同步"));
-                        modal.contentEl.createEl("p", { text:
-                            localize("账号：") + preview.accountId + localize("；本地知识库：") + preview.localVaultId +
-                            localize("；云端知识库：") + preview.cloudVaultId + localize("；设备：") + preview.deviceId });
-                        modal.contentEl.createEl("p", { text:
-                            localize("已重新核查完整云端清单、当前本地正文SHA及历史可信版本。") +
-                            localize("以下普通文件可在明确确认后参与本次日常同步；") +
-                            localize("删除、结果未知的上传和异常清单需要单独复核。") });
-                        const uploadCount = preview.entries.filter((e) => e.action === "UPLOAD").length;
-                        const downloadCount = preview.entries.filter((e) => e.action === "DOWNLOAD").length;
-                        modal.contentEl.createEl("p", { text:
-                            localize("当前普通范围：") + preview.entries.length +
-                            localize(" 项；预计上传：") + uploadCount + localize("；预计下载：") + downloadCount +
-                            localize("；忽略的保护/排除文件：") + preview.ignoredRecoveryCopies + "。" });
-                        const files = modal.contentEl.createDiv();
-                        for (const e of preview.entries) {
-                            const row = files.createEl("p", { text: e.action + "：" + e.path });
-                            row.createEl("small", { text:
-                                localize("（本地大小：") + e.localSize + localize("字节；云端大小：") + e.remoteSize +
-                                localize("字节；本地SHA：") + (e.localHash || localize("无")) +
-                                localize("；云端ETag：") + (e.remoteEtag || localize("无")) + "）" });
-                        }
-                        modal.contentEl.createEl("p", { text:
-                            localize("确认后可继续手动同步。") +
-                            localize("恢复后可在同步设置里开启自动同步。") });
-                        const cancel = modal.contentEl.createEl("button", { text: localize("取消，继续暂停") });
-                        cancel.onclick = () => modal.close();
-                        const allow = modal.contentEl.createEl("button", { text: localize("明确确认本次日常同步范围") });
-                        allow.onclick = async () => {
-                            if (submitted) return;
-                            submitted = true;
-                            allow.disabled = true;
-                            try {
-                                const permitted = await this.runtime.oneDrive.confirmResumedDailySyncReview(
-                                    preview.ticket, true);
-                                if (permitted) new Notice(localize("手动同步已恢复。"), 7000);
-                            } catch (error: any) {
-                                new Notice(localize("日常同步未授权：") + localizeMessage(safeOneDriveError(error)), 8000);
-                            } finally {
-                                modal.close();
-                                this.display();
-                            }
-                        };
-                    };
-                    modal.onClose = () => {
-                        if (!submitted) void this.runtime.oneDrive.confirmResumedDailySyncReview(preview.ticket, false);
-                        modal.contentEl.empty();
-                    };
-                    modal.open();
-                } catch (error: any) {
-                    new Notice(localize("无法恢复日常同步：") + localizeMessage(safeOneDriveError(error)), 8000);
-                } finally {
-                    dailyButton.disabled = false;
-                }
-            };
             const reviewButton = section.createEl("button", { text: localize("重新只读核对本次文件范围") });
             const openFileReview = async (path?: string) => {
                 reviewButton.disabled = true;
@@ -1444,8 +1381,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             const area = container.createDiv({ cls: "smartmd-onedrive-delete-review" });
             new Setting(area).setClass("smartmd-settings-subheading").setName(localize("待人工确认的单端删除（") + pending.length + localize("项）")).setHeading();
             area.createEl("p", { text:
-                localize("一端文件不存在不代表允许删除另一端。请逐项确认目标/版本；将先核验恢复档案与当前文件版本，任何变化则安全停止。") });
+                localize("勾选要在另一端删除的文件。") });
             const chosen = new Set<string>();
+            const displayed = new Map(pending.map(item => [item.path, item.reviewKey]));
             for (const item of pending) {
                 const row = area.createDiv({ cls: "smartmd-card" });
                 const checkbox = row.createEl("input", { type: "checkbox" });
@@ -1458,16 +1396,14 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                     ? localize("授权后会将云端这份移入 OneDrive 回收站")
                     : Platform.isAndroidApp ? localize("授权后直接删除安卓上的本地文件")
                     : localize("授权后会将此本地笔记移入 Windows 系统回收站") });
-                row.createEl("p", { text: localize("版本：") + item.version.slice(0, 28) });
             }
             area.createEl("button", { text: localize("确认勾选文件的删除"), cls: "mod-warning" })
                 .onclick = async () => {
                     if (!chosen.size) { new Notice(localize("请先勾选目标文件")); return; }
-                    if (!window.confirm(localize("仅本次确认移除另一端的这些文件：{0}。是否确定？", [...chosen].join("\n")))) return;
                     try {
                         await this.runtime.oneDrive.confirmPendingOneDriveDeletions(
-                            [...chosen], true);
-                        new Notice(localize("本次逐项删除已完成，恢复副本已保留"));
+                            [...chosen], true, undefined, displayed);
+                        new Notice(localize("已删除选中的文件"));
                     } catch (error: any) {
                         new Notice(localize("本次删除未完成：") + localizeMessage(safeOneDriveError(error)), 8000);
                     }
@@ -1520,9 +1456,10 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             }
         }
         const sharingApproved = this.runtime.oneDrive.hasOneDriveSettingsSharingApproval();
+        const sharingError = this.runtime.oneDrive.getSharedSettingsError();
         new Setting(container)
             .setName(localize("OneDrive 插件设置共享（独立授权）"))
-            .setDesc(sharingApproved
+            .setDesc(sharingError ? localizeMessage(sharingError) : sharingApproved
                 ? localize("已单独许可本次字段版本的一次共享；发送后需重新预览批准")
                 : localize("默认关闭；只允许更新时间、批准的模型端点/型号及固定发布服务地址"))
             .addButton((button) => button.setButtonText(

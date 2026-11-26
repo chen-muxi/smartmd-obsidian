@@ -194,7 +194,6 @@ export class SmartMDStore {
             const uploadRecords = oneDrive.pendingUploadOperations;
             const unresolvedWrite = hasUnfinishedOneDriveSetup(oneDrive, accountId, oneDrive.vaultId, oneDrive.deviceId) ||
                 oneDrive.androidFirstDownload ||
-                ("pendingSharedUploadOperation" in oneDrive && oneDrive.pendingSharedUploadOperation) ||
                 (uploadRecords && (typeof uploadRecords !== "object" || Array.isArray(uploadRecords) ||
                     Object.keys(uploadRecords).length > 0));
             const keepConnection = this.loadedInThisProcess

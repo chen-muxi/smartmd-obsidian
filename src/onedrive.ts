@@ -16,6 +16,7 @@ import {
     sharedStateForSync,
     SharedSmartMDState,
     SyncFailureDiagnostic,
+    type SyncFileState,
     SyncSummary,
     SyncFailureCategory,
     ActionableRemediation,
@@ -77,6 +78,7 @@ type SyncPreview = {
     unexpectedNewTarget: boolean;
     identity?: { accountId: string; localVaultId: string; cloudVaultId: string };
     androidCloudVaultName?: string;
+    creatingCloudVault?: boolean;
     items?: Record<string, SyncPreviewItem>;
     priorHistoryCount?: number;
     resumedFirstUpload?: boolean;
@@ -132,6 +134,7 @@ type PendingFirstChoice = {
     name: string;
     mode: "new" | "existing";
     mergeAndroid?: boolean;
+    emptyAppRoot?: string;
 };
 
 type FirstConnectionSnapshot = {
@@ -219,7 +222,7 @@ export class SyncPreviewModal extends Modal {
     }
 
     onOpen(): void {
-        this.titleEl.setText(localize("首次同步预览"));
+        this.titleEl.setText(localize(this.preview.creatingCloudVault ? "新建 OneDrive 知识库预览" : "首次同步预览"));
         const androidPreview = this.preview.androidCloudVaultName !== undefined;
         const tipText = this.preview.finishFirstUploadOnly
             ? localize("已核验首次上传的全部文件。确认只完成绑定，本次不传输文件。之后的本地改动会留给下一次同步。")
@@ -371,20 +374,6 @@ export class SyncPreviewModal extends Modal {
     }
 }
 
-class AppFolderConsentModal extends Modal {
-    private completed = false;
-    constructor(app: App, private title: string, private explanation: string,
-        private approve: (yes: boolean) => void) { super(app); }
-    onOpen(): void {
-        this.titleEl.setText(this.title);
-        this.contentEl.createEl("p", { text: localizeMessage(this.explanation) });
-        this.contentEl.createEl("button", { text: localize("暂不继续（默认）") }).onclick = () => this.close();
-        this.contentEl.createEl("button", { text: localize("明确确认，仅继续当前步骤"), cls: "mod-cta" })
-            .onclick = () => { this.completed = true; this.approve(true); this.close(); };
-    }
-    onClose(): void { this.contentEl.empty(); if (!this.completed) this.approve(false); }
-}
-
 function androidVaultDisplayName(vault: Pick<RemoteVault, "name" | "id">, vaults: RemoteVault[]): string {
     const label = vault.name || localize("未命名知识库");
     const hasSameName = vaults.some(other => other.id !== vault.id &&
@@ -508,9 +497,6 @@ export type ResumedOneDriveReview = {
     localVaultId: string; cloudVaultId: string;
     expiresAt: number; entries: ResumedEntry[];
 };
-export type ResumedDailySyncReview = ResumedOneDriveReview & {
-    ignoredRecoveryCopies: number;
-};
 
 export class OneDriveSyncService {
     private running = false;
@@ -530,6 +516,7 @@ export class OneDriveSyncService {
     private firstConnectionError = "";
     private firstConnectionProgress = "";
     private firstConnectionNotice: Notice | null = null;
+    private sharedSettingsError = "";
     private readonly firstUploadReadTimeoutMs = 30_000;
     private deleteGuard: ((path: string, readOnly?: boolean) => Promise<boolean>) | null = null;
     private ensuredRemoteFolders = new Set<string>();
@@ -561,10 +548,6 @@ export class OneDriveSyncService {
     private resumedReviewTickets = new WeakMap<object, {
         snapshot: string; expiresAt: number; targetPath?: string;
     }>();
-    private dailySyncReviewTickets = new WeakMap<object, {
-        snapshot: string; expiresAt: number; generation: number;
-    }>();
-    private dailySyncApprovalInFlight = false;
     // Only one durable completed-upload ledger settlement may run at a time.
     // No new preview/approval can observe an uncommitted deletion.
     private uploadLedgerReconciliationInFlight = false;
@@ -708,7 +691,7 @@ export class OneDriveSyncService {
         ]);
         const locals = this.app.vault.getFiles();
         const remotes = await this.remoteFiles(true, true);
-        if (locals.length + remotes.length > 4000) {
+        if (!targetPath && locals.length + remotes.length > 4000) {
             throw new Error("当前清单超出限定单次安全核查容量，不得自动恢复旧同步计划");
         }
         const localMap = new Map(locals.map((file) => [file.path, file]));
@@ -871,7 +854,7 @@ export class OneDriveSyncService {
         const generation = this.resumedApprovalGeneration;
         if (targetPath && !Platform.isAndroidApp) throw new Error("当前平台不支持指定单条重新核验");
         await this.verifyCompletedIdenticalRegistration();
-        if (this.dailySyncApprovalInFlight || this.resumedInFlight || this.uploadLedgerReconciliationInFlight ||
+        if (this.resumedInFlight || this.uploadLedgerReconciliationInFlight ||
             this.uploadLedgerSettlementInFlight || this.unknownSettlementInFlight) {
             throw new Error("上一轮操作仍在执行或上传日志正在持久结算，禁止签发新预览");
         }
@@ -888,114 +871,6 @@ export class OneDriveSyncService {
             deviceId: snapshot.deviceId, expiresAt,
             entries: snapshot.entries.map((entry) => ({ ...entry })),
         };
-    }
-
-    // An exceptional pause can be cleared only after checking the current files.
-    private eligibleDailySyncEntries(snapshot: ResumedSnapshot): ResumedEntry[] {
-        const s = this.settings();
-        if (Object.keys(s.pendingDeletions || {}).length ||
-            Object.keys(s.pendingUploadOperations || {}).length ||
-            hasUnfinishedOneDriveSetup(s, snapshot.accountId, snapshot.vaultId, snapshot.deviceId)) {
-            throw new Error("仍有删除、未知上传或未结算首次提交记录，须逐项结案后才能恢复日常同步");
-        }
-        const active = snapshot.entries.filter((entry) => !this.isIgnored(entry.path) &&
-            (!Platform.isAndroidApp || Math.max(entry.localSize, entry.remoteSize) <= this.maxBytes()));
-        const blocked = active.find((entry) =>
-            !["UNCHANGED", "UPLOAD", "DOWNLOAD"].includes(entry.action));
-        if (blocked) {
-            throw new Error("当前清单仍有未决或不能一次授权的项目：" +
-                redactOneDriveText(blocked.path) + "；必须先单文件处理");
-        }
-        return active;
-    }
-
-    async prepareResumedDailySyncReview(): Promise<ResumedDailySyncReview> {
-        await this.verifyCompletedIdenticalRegistration();
-        if (this.dailySyncApprovalInFlight || this.resumedInFlight ||
-            this.uploadLedgerReconciliationInFlight || this.uploadLedgerSettlementInFlight ||
-            this.unknownSettlementInFlight) {
-            throw new Error("已有审查或操作正在执行，不能同时签发日常同步许可");
-        }
-        const snapshot = await this.captureResumedOneDriveReview();
-        const entries = this.eligibleDailySyncEntries(snapshot);
-        const ticket = Object.freeze({});
-        const expiresAt = Date.now() + 5 * 60_000;
-        this.dailySyncReviewTickets.set(ticket, {
-            snapshot: JSON.stringify(snapshot), expiresAt,
-            generation: this.resumedApprovalGeneration,
-        });
-        return {
-            ticket, accountId: snapshot.accountId, vaultId: snapshot.vaultId,
-            localVaultId: snapshot.localVaultId, cloudVaultId: snapshot.cloudVaultId,
-            deviceId: snapshot.deviceId, expiresAt,
-            entries: entries.map((entry) => ({ ...entry })),
-            ignoredRecoveryCopies: snapshot.entries.length - entries.length,
-        };
-    }
-
-    async confirmResumedDailySyncReview(ticket: object, approved = false): Promise<boolean> {
-        const issued = ticket && typeof ticket === "object"
-            ? this.dailySyncReviewTickets.get(ticket) : undefined;
-        if (ticket && typeof ticket === "object") this.dailySyncReviewTickets.delete(ticket);
-        if (!approved) return false;
-        if (!issued || issued.expiresAt <= Date.now() ||
-            issued.generation !== this.resumedApprovalGeneration ||
-            this.dailySyncApprovalInFlight || this.resumedInFlight ||
-            this.uploadLedgerSettlementInFlight || this.uploadLedgerReconciliationInFlight ||
-            this.unknownSettlementInFlight || this.running || this.preparing || this.operationJob) {
-            throw new Error("本次日常同步批准不存在、过期或有另一项操作在运行，必须重新只读核验");
-        }
-        this.dailySyncApprovalInFlight = true;
-        const s = this.settings();
-        let granted = false;
-        try {
-            // A second independent full inventory, local SHA and Graph ETag
-            // check is required immediately before the user decision takes effect.
-            const current = await this.captureResumedOneDriveReview();
-            const safe = this.eligibleDailySyncEntries(current);
-            if (!safe.length || JSON.stringify(current) !== issued.snapshot ||
-                issued.expiresAt <= Date.now() ||
-                issued.generation !== this.resumedApprovalGeneration ||
-                this.settings() !== s ||
-                (this.store as any).installationProofIsValid?.() !== true) {
-                throw new Error("日常同步批准后范围、字节、云端版本或身份已变化；旧票据拒止");
-            }
-            this.authority.confirm(s);
-            granted = true;
-            s.autoMode = "manual";
-            s.enabled = false;
-            s.onStartup = false;
-            s.afterSave = false;
-            s.intervalMinutes = 0;
-            s.status = "ready";
-            s.lastError = "";
-            await (this.store as any).save();
-            if (issued.generation !== this.resumedApprovalGeneration ||
-                issued.expiresAt <= Date.now() || !this.canRun() || this.settings() !== s) {
-                throw new Error("日常同步批准持久化期间身份、期限或许可已变化，权限作废");
-            }
-            // Previously issued per-file approvals cannot survive a new scope grant.
-            this.resumedApprovalGeneration++;
-            this.resumedReviewTickets = new WeakMap();
-            this.dailySyncReviewTickets = new WeakMap();
-            this.notifyStatusChange();
-            return true;
-        } catch (error) {
-            if (granted) {
-                await this.authority.stop(s);
-                s.enabled = false;
-                s.autoMode = "manual";
-                s.onStartup = false;
-                s.afterSave = false;
-                s.intervalMinutes = 0;
-                s.status = "paused";
-                s.lastError = "本次日常同步授权未生效，必须重新只读确认";
-                await (this.store as any).save();
-            }
-            throw error;
-        } finally {
-            this.dailySyncApprovalInFlight = false;
-        }
     }
 
     /**
@@ -1742,22 +1617,18 @@ export class OneDriveSyncService {
         const total = missingLocal.length + missingRemote.length;
         const files = Math.max(local.length, remote.length, Object.keys(previous).length);
         const threshold = Math.max(3, Math.ceil(files * 0.05));
-        const bothMissing = paths.some((path) => previous[path] &&
-            !localMap.has(path) && !remoteMap.has(path));
         const remoteUnexpectedlyEmpty = remote.length === 0 &&
-            Object.values(previous).some((item) => Boolean(item?.remoteId));
-        const frozen = total > threshold || bothMissing || remoteUnexpectedlyEmpty;
+            Object.entries(previous).some(([path, item]) => !skippedPaths.has(path) && !this.isIgnored(path) && Boolean(item?.remoteId));
+        const frozen = total > threshold || remoteUnexpectedlyEmpty;
         return { frozen, reason: remoteUnexpectedlyEmpty
             ? "DELETION_FROZEN：历史非空的云端清单变为空，必须重新核实，禁止按旧删除确认移除本机原件。"
-            : bothMissing
-            ? "DELETION_FROZEN：历史文件两端同时缺失，保留原同步基线并重新对账。"
             : frozen
                 ? `DELETION_FROZEN：待删除 ${total} 项超过安全阈值 ${threshold} 项。请先核对缺失来源、恢复误删文件，再重新检查；最终确认不能绕过风暴保护。`
                 : "" };
     }
 
     listPendingOneDriveDeletions(): Array<{
-        path: string; direction: "cloud" | "vault"; version: string;
+        path: string; direction: "cloud" | "vault"; reviewKey: string;
     }> {
         const pending = (this.settings().pendingDeletions || {}) as Record<string, any>;
         return Object.entries(pending)
@@ -1766,7 +1637,7 @@ export class OneDriveSyncService {
             .map(([path, entry]) => ({
                 path,
                 direction: entry.direction,
-                version: String(entry.remoteEtag || entry.localHash || ""),
+                reviewKey: JSON.stringify(entry),
             }));
     }
 
@@ -1782,6 +1653,7 @@ export class OneDriveSyncService {
 
     async confirmPendingOneDriveDeletions(
         paths: string[], approved = false, resumedOperation?: RunTicket,
+        displayedRecords?: ReadonlyMap<string, string>,
     ): Promise<void> {
         if (!approved) throw new Error("缺少本批删除范围的明确人工确认");
         const resumedApproved = Boolean(resumedOperation && paths?.length === 1
@@ -1832,7 +1704,7 @@ export class OneDriveSyncService {
         const pinned = unique.map((path) => {
             const record = consented[path];
             const currentAccount = String((this.store as any).settings.local.microsoftAccountId || "");
-            if (!record || !currentAccount ||
+            if (!record || (displayedRecords && displayedRecords.get(path) !== JSON.stringify(record)) || !currentAccount ||
                 record.accountId !== currentAccount ||
                 record.vaultId !== settings.vaultId ||
                 record.deviceId !== settings.deviceId ||
@@ -2592,6 +2464,56 @@ export class OneDriveSyncService {
             && settings.confirmationAccountId === String(local.microsoftAccountId || "");
     }
 
+    canStartManualSync(): boolean {
+        return !this.settings().firstSyncCompleted || this.canRun() || this.canResumeManualSync();
+    }
+
+    private canResumeManualSync(): boolean {
+        const settings = this.settings();
+        const accountId = this.store.settings.local.microsoftAccountId;
+        const uploads = settings.pendingUploadOperations;
+        return this.resumedHistoricalIdentityTrusted() &&
+            settings.status !== "stopping" &&
+            !this.deletionApprovalRunning && !this.resumedInFlight &&
+            !this.uploadLedgerReconciliationInFlight && !this.uploadLedgerSettlementInFlight &&
+            !this.unknownSettlementInFlight && !settings.androidFirstDownload &&
+            (!uploads || (typeof uploads === "object" && !Array.isArray(uploads) && !Object.keys(uploads).length)) &&
+            !hasUnfinishedOneDriveSetup(settings, accountId, settings.vaultId, settings.deviceId);
+    }
+
+    private async resumeManualSync(): Promise<RemoteFile[] | null> {
+        if (!this.canResumeManualSync()) return null;
+        const settings = this.settings();
+        const scope = this.resumedContextKey();
+        const generation = this.resumedApprovalGeneration;
+        const unchanged = () => this.settings() === settings && this.resumedContextKey() === scope &&
+            this.resumedApprovalGeneration === generation;
+        await this.assertFirstCommitGraphAccount(settings.confirmationAccountId!);
+        const remote = await this.remoteFiles(true, true);
+        if (remote.some(item => item.path.startsWith("_suite_staging/"))) {
+            throw new Error("上次上传还没有核对完成，请先检查上传记录。");
+        }
+        if (!unchanged() || !this.canResumeManualSync()) return null;
+        this.authority.confirm(settings);
+        settings.status = "ready";
+        settings.lastError = "";
+        try {
+            await this.store.saveWithIdentityGuard(() => {
+                if (!unchanged() || !this.canRun()) throw new Error("知识库连接已变化，请再试一次。");
+            });
+        } catch (error) {
+            if (unchanged()) {
+                await this.authority.stop(settings);
+                settings.status = "paused";
+            }
+            throw error;
+        }
+        if (!unchanged() || !this.canRun()) return null;
+        this.resumedApprovalGeneration++;
+        this.resumedReviewTickets = new WeakMap();
+        return remote;
+    }
+
     async manualSync(): Promise<boolean> {
         return await this.runUnifiedOperation(() => this.performManualSync());
     }
@@ -2603,9 +2525,16 @@ export class OneDriveSyncService {
             new Notice(localize("原同内容登记待核实；请先核验原操作，不会新建另一登记或传输正文。"), 8000);
             return false;
         }
-        // Existing completed vaults may sync only under their recorded operation authority.
         if (settings.firstSyncCompleted) {
-            return this.canRun() ? await this.sync(false) : false;
+            if (this.canRun()) return await this.sync(false);
+            try {
+                await this.verifyCompletedIdenticalRegistration();
+                const remote = await this.resumeManualSync();
+                return remote !== null && await this.sync(false, { local: this.localFiles(), allRemote: remote });
+            } catch (error: any) {
+                if (this.settings() === settings) await this.fail(error);
+                return false;
+            }
         }
         this.preparing = true;
         this.firstConnectionError = "";
@@ -2620,14 +2549,8 @@ export class OneDriveSyncService {
         };
         try {
             if (!initialAccount) throw new Error("请先完成微软账号登录。");
-            // Android discloses possible app folder creation next to Start
-            // syncing. Desktop keeps its existing confirmation. Both still
-            // require separate approval of the file plan below.
-            if (!Platform.isAndroidApp && !await this.approveFirstAppFolderStep(
-                "访问 OneDrive 专用应用目录",
-                "微软首次访问 AppFolder 时可能自动建立 Apps/SmartMD 文件夹。本次只批准访问和核对目录，不批准上传笔记、合并知识库或删除文件。是否继续？")) {
-                return false;
-            }
+            // First use can open the OneDrive app folder. Creating a cloud
+            // vault and transferring files still require the preview action.
             this.vaultRegistryCache = null;
             this.registryReadIsTrusted = false;
             if (settings.firstFileJournal && !settings.firstCommitJournal?.priorBindingArchive) {
@@ -2810,6 +2733,7 @@ export class OneDriveSyncService {
                     localVaultId: prepared.snapshot.localVaultId, cloudVaultId: choice.id },
                 androidCloudVaultName: Platform.isAndroidApp
                     ? androidVaultDisplayName(choice, this.vaultRegistryCache ?? []) : undefined,
+                creatingCloudVault: choice.mode === "new",
                 items,
                 priorHistoryCount: choice.mode === "new" ? Object.keys(settings.fileStates || {}).length : 0,
             };
@@ -2843,8 +2767,14 @@ export class OneDriveSyncService {
                             throw new Error("拟新建云端目录已有内容，禁止按全新副本提交；请重新检查。");
                         }
                         if (choice.mode === "new") {
-                            if (this.skippedLocalPaths().size) {
-                                throw new Error("存在超过上限的本地文件，禁止登记不完整的独立云库");
+                            let approvedSnapshot = prepared.snapshot;
+                            if (choice.emptyAppRoot) {
+                                const registryHash = await this.bootstrapEmptyAppFolderRegistry(
+                                    initialAccount, choice.emptyAppRoot, assertFirstGrantCurrent);
+                                choice.emptyAppRoot = undefined;
+                                await this.readVaultRegistry();
+                                approvedSnapshot = { ...prepared.snapshot, registryHash };
+                                await this.assertFirstConnectionSnapshotFresh(approvedSnapshot);
                             }
                             // Four stage registration -> version-pinned upload ->
                             // per-byte verification -> durable binding. Never use
@@ -2863,7 +2793,7 @@ export class OneDriveSyncService {
                                 mode: "create_new",
                                 registryEtag: meta.etag,
                                 registryVaults: registry.vaults,
-                                snapshotDigest: await contentHash(JSON.stringify(prepared.snapshot)),
+                                snapshotDigest: await contentHash(JSON.stringify(approvedSnapshot)),
                                 uploads: local.map((entry) => entry.path).sort(),
                                 downloads: [], conflicts: [], unknown: [],
                                 expiresAt: Date.now() + 5 * 60_000,
@@ -3093,7 +3023,6 @@ export class OneDriveSyncService {
         this.autoFollowUpGeneration++;
         this.followUpQueued = false;
         this.resumedReviewTickets = new WeakMap();
-        this.dailySyncReviewTickets = new WeakMap();
         this.pendingSharedImport = null;
         settings.status = "stopping";
         settings.lastError = "";
@@ -3133,9 +3062,8 @@ export class OneDriveSyncService {
         const settings = this.settings();
         if (!settings.firstSyncCompleted) throw new Error("首次手动同步成功后才能启用自动同步。");
         if (this.isBusy() ||
-            Object.keys(settings.pendingDeletions || {}).length ||
             Object.keys(settings.pendingUploadOperations || {}).length) {
-            throw new Error("仍有同步作业、删除或上传日志；须完成后才能开启自动同步");
+            throw new Error("请等当前同步或上次未完成的上传处理完毕，再开启自动同步。");
         }
         if (!this.canRun()) {
             throw new Error("本轮同步执行许可已失效。请先重新只读核对账号、云库、版本和文件范围并明确批准；切换自动同步方式不能恢复旧许可。");
@@ -3153,7 +3081,6 @@ export class OneDriveSyncService {
     dispose(): void {
         this.resumedApprovalGeneration++;
         this.resumedReviewTickets = new WeakMap();
-        this.dailySyncReviewTickets = new WeakMap();
         if (this.resumedTransientState) this.resumedTransientState.runAllowed = false;
         void this.authority.shutdown();
         if (typeof window !== "undefined") window.clearTimeout(this.saveTimer);
@@ -3166,7 +3093,7 @@ export class OneDriveSyncService {
         reportProgress: ((message: string) => void) | null = null,
         silentSuccess = false,
     ): Promise<boolean> {
-        if (this.running || this.uploadLedgerReconciliationInFlight ||
+        if (this.running || this.deletionApprovalRunning || this.uploadLedgerReconciliationInFlight ||
             this.uploadLedgerSettlementInFlight || !this.canRun()) return false;
         if (firstSync) {
             if (!this.activeFirstSyncTicket) return false;
@@ -3215,7 +3142,14 @@ export class OneDriveSyncService {
         try {
             reportProgress?.(localize("正在读取本地与云端状态…"));
             const local = prepared?.local || this.localFiles();
-            const allRemote = prepared?.allRemote || await this.remoteFiles();
+            const previous = settings.fileStates || {};
+            let allRemote = prepared?.allRemote || await this.remoteFiles();
+            if (!firstSync && !prepared && !allRemote.length &&
+                Object.values(previous).some(item => Boolean((item as SyncFileState)?.remoteId))) {
+                // Confirm an empty delta against a full listing of the bound
+                // vault. An empty list never permits deleting a local copy.
+                allRemote = await this.remoteFiles(true, true);
+            }
             if (allRemote.some((item) => item.path.startsWith("_suite_staging/"))) {
                 // Legacy orphan staging can predate the durable ledger; without
                 // an authenticated mother-path/operation relation this batch
@@ -3227,22 +3161,9 @@ export class OneDriveSyncService {
                 if (this.isIgnored(item.path) || item.size > this.maxBytes()) skippedPaths.add(item.path);
             }
             const remote = allRemote.filter((item) => !skippedPaths.has(item.path) && !this.isIgnored(item.path));
-            const previous = settings.fileStates || {};
-            const remoteLooksIncomplete = !firstSync
-                && Object.values(previous).some((item: any) => Boolean(item?.remoteId))
-                && remote.length === 0;
-            if (remoteLooksIncomplete) throw new Error("云端记录异常，已暂停删除并等待重新比对");
 
             const localMap = new Map(local.map((item) => [item.path, item]));
             const remoteMap = new Map(remote.map((item) => [item.path, item]));
-            // If both sides now omit a historically tracked file, that is NOT
-            // evidence of an intentional deletion. Preserve the last baseline.
-            const bothMissing = Object.keys(previous).some((path) =>
-                !this.isIgnored(path) && !skippedPaths.has(path) &&
-                !localMap.has(path) && !remoteMap.has(path));
-            if (bothMissing) {
-                throw new Error("历史文件两端同时缺失，尚无法核实删除意图，已保留原同步基线并暂停");
-            }
             const allPaths = new Set([...localMap.keys(), ...remoteMap.keys(), ...Object.keys(previous).filter((path) => !skippedPaths.has(path) && !this.isIgnored(path)), ]);
             // Skipping an ignored or oversized path is not evidence that its
             // historical local/remote file was deleted. Preserve the last
@@ -3356,7 +3277,12 @@ export class OneDriveSyncService {
                 const localItem = localMap.get(path);
                 const remoteItem = remoteMap.get(path);
                 const old = previous[path];
-                if (localItem && remoteItem) delete settings.pendingDeletions[path];
+                if (Boolean(localItem) === Boolean(remoteItem)) delete settings.pendingDeletions[path];
+                if (!localItem && !remoteItem) {
+                    // Keep the last known version if the path reappears.
+                    if (old) next[path] = old;
+                    continue;
+                }
 
                 try {
                     let attempts = 0;
@@ -3638,8 +3564,9 @@ export class OneDriveSyncService {
                     // the whole round (permission revoked, root disappeared,
                     // or drive out of quota). Do not try the next session or
                     // treat a second file's success as recovery of the scope.
-                    const invalidCloudScope = [403, 404, 507].includes(
-                        Number(fileError?.status || 0));
+                    const status = Number(fileError?.status || 0);
+                    const invalidCloudScope = status === 403 || status === 507 ||
+                        (status === 404 && !fileError?.isMissingFile);
                     if (!this.isCurrent(operation) || settings.androidFirstDownload || fileError?.isFatalAuth ||
                         fileError?.isUnknownCommit || invalidCloudScope) {
                         throw fileError;
@@ -3717,16 +3644,12 @@ export class OneDriveSyncService {
             settings.failedDiagnostics = [];
             try {
                 reportProgress?.(localize("正在确认同步及恢复记录…"));
-                await this.syncSharedState(operation);
-                if (this.getPendingOneDriveIncomingSharedSettings()) {
-                    // Successful file processing does not authorize applying
-                    // incoming settings or declaring the entire round complete.
-                    settings.status = "paused";
-                    settings.lastError = "云端插件共享设置有待本机独立确认，本轮尚未全部完成。";
-                    await (this.store as any).save();
-                    this.statusCallback?.("SmartMD: 共享设置待确认");
-                    new Notice(localize("OneDrive 文件检查已结束，但共享设置仍待本机确认。"), 8000);
-                    return false;
+                try {
+                    await this.syncSharedState(operation);
+                    this.sharedSettingsError = "";
+                } catch (error) {
+                    this.assertCurrent(operation);
+                    this.sharedSettingsError = safeOneDriveError(error);
                 }
                 await this.purgeExpiredRecovery();
                 this.assertCurrent(operation);
@@ -4171,12 +4094,6 @@ export class OneDriveSyncService {
         }
     }
 
-    private async approveFirstAppFolderStep(title: string, text: string): Promise<boolean> {
-        return await new Promise<boolean>((resolve) => {
-            new AppFolderConsentModal(this.app, title, text, resolve).open();
-        });
-    }
-
     // An absent registry is NEVER sufficient evidence of a new account.
     // This inventory runs only after the user consented to a special-folder
     // GET that Microsoft may implement as implicit AppFolder creation.
@@ -4241,7 +4158,7 @@ export class OneDriveSyncService {
         this.registryReadIsTrusted = false;
     }
 
-    private async bootstrapEmptyAppFolderRegistry(accountId: string): Promise<boolean> {
+    private async inspectEmptyAppFolderForSetup(accountId: string): Promise<string> {
         const settings = this.settings();
         const local = (this.store as any).settings.local;
         const hasEntries = (value: any): boolean => Boolean(value &&
@@ -4257,24 +4174,28 @@ export class OneDriveSyncService {
         }
         // The missing registry may be a deletion or corruption, not a new user.
         // Only a *fully enumerated empty app root* permits a new bootstrap.
+        await this.assertFirstCommitGraphAccount(accountId);
         const firstRoot = await this.readEmptyAppFolderRootId();
         if (await this.readSharedState("vaults/registry.json") !== null) {
             throw new Error("空白AppFolder检查时注册表已出现，必须重新读取");
         }
-        const approved = await this.approveFirstAppFolderStep(
-            "初始化全新空白 OneDrive AppFolder",
-            "已核实此应用目录没有任何文件或子目录。仅本次创建 vaults/registry.json 空白注册表，不上传笔记、不绑定知识库、不删除数据；后续首次同步仍需再次单独确认。是否批准？");
-        if (!approved) return false;
+        return firstRoot;
+    }
+
+    private async bootstrapEmptyAppFolderRegistry(
+        accountId: string, firstRoot: string, assertGrantCurrent: () => void,
+    ): Promise<string> {
+        const settings = this.settings();
+        assertGrantCurrent();
         const sameScope = () => this.settings() === settings &&
             String((this.store as any).settings.local.microsoftAccountId || "") === accountId &&
             settings.firstSyncCompleted !== true && settings.runAllowed !== true &&
             (this.store as any).installationProofIsValid?.() === true;
         if (!sameScope()) throw new Error("首次初始化账号、设备或权限已变化");
-        await this.assertFirstCommitGraphAccount(accountId);
-        if (firstRoot !== await this.readEmptyAppFolderRootId() ||
-            await this.readSharedState("vaults/registry.json") !== null) {
+        if (firstRoot !== await this.inspectEmptyAppFolderForSetup(accountId)) {
             throw new Error("空白目录二次复核已变化，停止创建");
         }
+        assertGrantCurrent();
         const journal: any = {
             opId: typeof crypto.randomUUID === "function" ? crypto.randomUUID() :
                 Date.now().toString(36) + "-" + Math.random().toString(36).slice(2),
@@ -4287,6 +4208,7 @@ export class OneDriveSyncService {
             throw error;
         }
         const guard = () => {
+            assertGrantCurrent();
             if (!sameScope() || settings.emptyAppFolderBootstrap !== journal ||
                 journal.stage !== "PREPARED") {
                 throw new Error("空白AppFolder创建许可已失效");
@@ -4323,8 +4245,7 @@ export class OneDriveSyncService {
             delete settings.emptyAppFolderBootstrap;
             await (this.store as any).save();
             this.vaultRegistryCache = null;
-            this.registryReadIsTrusted = false;
-            return true;
+            return await contentHash(JSON.stringify(current));
         } catch (error) {
             // A failed save may leave the remote registry committed; never
             // drop the durable identity of the original bootstrap operation.
@@ -4372,17 +4293,13 @@ export class OneDriveSyncService {
         const accountId = String((this.store as any).settings.local.microsoftAccountId || "");
         if (!accountId) return false;
         await this.reconcileEmptyAppFolderBootstrap();
-        let vaults = await this.readVaultRegistry();
+        const vaults = await this.readVaultRegistry();
+        let emptyAppRoot: string | undefined;
         if (!this.registryReadIsTrusted) {
             // Existing vault directories without their registry are not a
             // new installation: never overwrite or silently reconstruct them.
-            if (vaults.length || !(await this.bootstrapEmptyAppFolderRegistry(accountId))) {
-                throw new Error("云端注册信息缺失或空白初始化已取消；原云库不变。");
-            }
-            vaults = await this.readVaultRegistry();
-            if (!this.registryReadIsTrusted || vaults.length) {
-                throw new Error("空白注册表初始化后身份仍无法验证，已停止连接。");
-            }
+            if (vaults.length) throw new Error("云端知识库列表不完整。请稍后重试。");
+            emptyAppRoot = await this.inspectEmptyAppFolderForSetup(accountId);
         }
         const current = vaults.find((vault) => vault.id === settings.vaultId);
         if (settings.androidFirstMerge) {
@@ -4419,8 +4336,8 @@ export class OneDriveSyncService {
             // 若凭据不匹配（不可信配置/导入配置），绝不静默 return false 造成死锁，降级打开模态窗重新确认
         }
 
-        const eligibleReceiver = await this.freshFirstReceiverEligible(accountId);
-        const choice = await new Promise<RemoteVault | "new" | null>((resolve) => {
+        const eligibleReceiver = vaults.length > 0 && await this.freshFirstReceiverEligible(accountId);
+        const choice = vaults.length === 0 ? "new" : await new Promise<RemoteVault | "new" | null>((resolve) => {
             new VaultSelectionModal(this.app, vaults, resolve, eligibleReceiver,
                 Platform.isDesktopApp && Platform.isWin, !eligibleReceiver && this.canStartAndroidFirstMerge(accountId)).open();
         });
@@ -4429,7 +4346,7 @@ export class OneDriveSyncService {
             const newId = "vault-" + (typeof crypto.randomUUID === "function"
                 ? crypto.randomUUID()
                 : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
-            this.pendingFirstChoice = { id: newId, name: this.app.vault.getName(), mode: "new" };
+            this.pendingFirstChoice = { id: newId, name: this.app.vault.getName(), mode: "new", emptyAppRoot };
         } else {
             const match = vaults.find((vault) => vault.id === choice.id);
             if (!match) throw new Error("云端知识库选择已过期，需重新检查。");
@@ -4837,10 +4754,10 @@ export class OneDriveSyncService {
     private async currentFirstFileEntries(scope?: FirstUploadReadScope, onFile?: (done: number, total: number) => void): Promise<FirstFileEntry[]> {
         const local = this.localFiles().sort((a, b) => a.path.localeCompare(b.path));
         const items: FirstFileEntry[] = [];
-        if (this.skippedLocalPaths().size) {
+        const archivedBinding = Boolean(this.settings().firstCommitJournal?.priorBindingArchive);
+        if (archivedBinding && this.skippedLocalPaths().size) {
             throw new Error("存在未批准的大文件跳过项，不能宣称独立云端副本完整。");
         }
-        const archivedBinding = Boolean(this.settings().firstCommitJournal?.priorBindingArchive);
         for (const item of local) {
             scope?.assertCurrent();
             if (!item.path || item.path.startsWith("/") || item.path.includes("\\")
@@ -5507,7 +5424,7 @@ export class OneDriveSyncService {
         remote: RemoteFile[];
     }> {
         const choice = this.pendingFirstChoice;
-        if (!choice || this.previewVaultId !== choice.id || !this.registryReadIsTrusted) {
+        if (!choice || this.previewVaultId !== choice.id || (!this.registryReadIsTrusted && !choice.emptyAppRoot)) {
             throw new Error("首次连接身份尚未通过只读核验。");
         }
         const settings = this.settings();
@@ -5529,7 +5446,9 @@ export class OneDriveSyncService {
                 throw new Error("云端文件身份或 ETag 不完整，已停止预览。");
             }
         }
-        const registry = await this.readSharedState("vaults/registry.json");
+        const registry = choice.emptyAppRoot
+            ? { vaults: [], emptyAppRoot: await this.inspectEmptyAppFolderForSetup(accountId) }
+            : await this.readSharedState("vaults/registry.json");
         if (!Array.isArray(registry?.vaults)) throw new Error("云端注册表已变化，需重新检查。");
         const remoteIdentityExists = registry.vaults.some((item: any) => item?.id === choice.id);
         if (remoteIdentityExists !== (choice.mode === "existing")) {
@@ -6511,6 +6430,7 @@ export class OneDriveSyncService {
         if (response.status < 200 || response.status >= 300) {
             const error: any = new Error(`下载失败：${remote.path} (HTTP ${response.status})`);
             error.status = response.status;
+            error.isMissingFile = response.status === 404;
             throw error;
         }
         return response.arrayBuffer;
@@ -7023,6 +6943,10 @@ export class OneDriveSyncService {
         const meta = await this.readRemoteFileMetadata(path, true);
         if (!meta?.etag) throw new Error("无法验证云端插件共享设置版本，拒绝无条件覆盖");
         await this.sendApprovedSharedState(operation, path, localShared, localHash, meta);
+    }
+
+    getSharedSettingsError(): string {
+        return this.sharedSettingsError;
     }
 
     private async sendApprovedSharedState(
