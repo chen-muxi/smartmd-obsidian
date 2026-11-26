@@ -3814,7 +3814,7 @@ export class OneDriveSyncService {
                     this.assertCurrent(operation);
                     this.sharedSettingsError = safeOneDriveError(error);
                 }
-                await this.purgeExpiredRecovery();
+                await this.maintainOneDriveRecoveries(operation);
                 this.assertCurrent(operation);
                 await (this.store as any).save();
                 if (firstSync && !wasFirstCompleted) {
@@ -7290,8 +7290,9 @@ export class OneDriveSyncService {
             ?.replace(/[^a-zA-Z0-9_.-]/g, "_") || "untitled.md";
         // A previous export may have failed byte verification but left an output
         // behind. Never overwrite or remove it: use a bounded new filename.
-        for (let attempt = 0; attempt < 3; attempt++) {
-            const suffix = attempt === 0 ? "" : "-retry-" + attempt;
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const suffix = attempt === 0 ? "" : attempt === 3
+                ? "-copy-" + crypto.randomUUID() : "-retry-" + attempt;
             const destination = normalizePath(
                 "OneDrive恢复的笔记/" + record.id + suffix + "-" + base);
             if (await this.app.vault.adapter.exists(destination) ||
@@ -7311,8 +7312,10 @@ export class OneDriveSyncService {
             }
             const previousExportedAt = record.exportedAt;
             const previousExportPath = record.exportPath;
+            const previousResolvedAt = record.resolvedAt;
             record.exportedAt = Date.now();
             record.exportPath = destination;
+            record.resolvedAt = record.sourceTrashPath ? 0 : record.exportedAt;
             try {
                 await (this.store as any).save();
             } catch (error) {
@@ -7321,6 +7324,7 @@ export class OneDriveSyncService {
                 // with an export marker that we cannot trust.
                 record.exportedAt = previousExportedAt;
                 record.exportPath = previousExportPath;
+                record.resolvedAt = previousResolvedAt;
                 throw error;
             }
             return destination;
@@ -7328,9 +7332,7 @@ export class OneDriveSyncService {
         throw new Error("安全恢复目标名称均已占用，原恢复副本保持锁定");
     }
 
-    async confirmOneDriveRecoveryResolved(recoveryId: string): Promise<void> {
-        const record = this.listOneDriveRecoveries().find((item: any) =>
-            item.id === recoveryId);
+    private async verifyOneDriveRecoveryExport(record: any): Promise<void> {
         if (!record || !record.verifiedAt || !record.exportedAt) {
             throw new Error("恢复副本尚未校验并另存，不能解除保留锁");
         }
@@ -7344,15 +7346,19 @@ export class OneDriveSyncService {
             (attempt === 0 ? "" : "-retry-" + attempt) + "-" + base));
         const archivePath = String(record.recoveryPath || "");
         const exportPath = String(record.exportPath || "");
-        if (!approvedExports.includes(exportPath) ||
-            !archivePath.startsWith(".suite-recovery/onedrive/") ||
-            archivePath.includes("..") || archivePath.includes("\\") ||
+        const copyPrefix = "OneDrive恢复的笔记/" + record.id + "-copy-";
+        const uuid = exportPath.startsWith(copyPrefix) && exportPath.endsWith("-" + base)
+            ? exportPath.slice(copyPrefix.length, -base.length - 1) : "";
+        const trustedCopy = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(uuid);
+        if ((!approvedExports.includes(exportPath) && !trustedCopy) ||
+            !/^onedrive_[a-z0-9]+_[a-z0-9]+$/.test(String(record.id)) ||
+            archivePath !== ".suite-recovery/onedrive/" + record.id + ".bin" ||
             !record.contentHash || !Number.isSafeInteger(record.contentBytes) ||
-            record.contentBytes <= 0) {
+            record.contentBytes < 0) {
             throw new Error("恢复记录的目标或来源身份不可信，原副本保持锁定");
         }
-        const exported = await this.readPhysicalBinary(exportPath);
         const archive = await this.readPhysicalBinary(archivePath);
+        const exported = await this.readPhysicalBinary(exportPath);
         if (exported.byteLength !== record.contentBytes ||
             archive.byteLength !== record.contentBytes ||
             (await this.sha256Bytes(exported)) !== record.contentHash ||
@@ -7373,15 +7379,6 @@ export class OneDriveSyncService {
                     }
                 }
             }
-        }
-        const previousResolvedAt = record.resolvedAt;
-        record.resolvedAt = Date.now();
-        try {
-            await (this.store as any).save();
-        } catch (error) {
-            // Keep the recovery locked when persistence is uncertain.
-            record.resolvedAt = previousResolvedAt;
-            throw error;
         }
     }
 
@@ -7666,75 +7663,51 @@ export class OneDriveSyncService {
         if (!silent) new Notice(localize("OneDrive 同步已暂停：{0}", localizeMessage(settings.lastError)), 8000);
     }
 
-    private async purgeExpiredRecovery(): Promise<void> {
-        const local: any = (this.store as any).settings.local;
-        const entries = Array.isArray(local.recoveryEntries) ? local.recoveryEntries : [];
-        const retained: any[] = [];
+    private async maintainOneDriveRecoveries(operation: RunTicket): Promise<void> {
+        const local = this.store.settings.local;
         const now = Date.now();
-        for (const entry of entries) {
-            const original = String(entry.recoveryPath || "");
-            const exported = String(entry.exportPath || "");
-            const deleted = Number(entry.deletedAt || 0);
-            const resolved = Number(entry.resolvedAt || 0);
-            if (deleted > 0 && now - deleted >= 6 * 24 * 60 * 60 * 1000 &&
-                (!entry.lastReminderAt ||
-                 now - Number(entry.lastReminderAt) >= 30 * 24 * 60 * 60 * 1000)) {
-                entry.lastReminderAt = now;
-                new Notice(localize("OneDrive 恢复档案待处理：") +
-                    redactOneDriveText(entry.relativePath || "未知文件") +
-                    localize("。未解决或唯一副本不会自动删除。"), 8000);
-            }
-            const safePaths =
-                original.startsWith(".suite-recovery/onedrive/") &&
-                original.endsWith(".bin") && !original.includes("..") &&
-                exported.startsWith("OneDrive恢复的笔记/") &&
-                !exported.includes("..");
-            // A clock rollback or corrupt legacy record must never make a
-            // recovery archive eligible for automatic deletion. The export
-            // and human resolution must follow the verified physical backup,
-            // and the original seven-day retention must not be shortened.
-            const verified = Number(entry.verifiedAt || 0);
-            const exportedAt = Number(entry.exportedAt || 0);
-            const expiresAt = Number(entry.expiresAt || 0);
-            const graceMs = 7 * 24 * 60 * 60 * 1000;
-            const trustedTimeline = [deleted, verified, exportedAt, resolved, expiresAt]
-                .every(Number.isSafeInteger)
-                && deleted > 0 && verified >= deleted
-                && exportedAt >= verified && resolved >= exportedAt
-                && expiresAt >= verified + graceMs;
-            const eligible = !entry.sourceTrashPath && safePaths && trustedTimeline && Boolean(entry.contentHash)
-                && now >= resolved && now - resolved >= graceMs
-                && now >= expiresAt && now >= deleted;
-            if (!eligible) { retained.push(entry); continue; }
+        const graceMs = 7 * 24 * 60 * 60 * 1000;
+        const resolved = new Map<any, string>();
+        const removed = new Set<any>();
+        for (const entry of this.listOneDriveRecoveries()) {
+            const { deletedAt, verifiedAt, exportedAt, resolvedAt, expiresAt } = entry;
+            if (![deletedAt, verifiedAt, exportedAt, expiresAt].every(Number.isSafeInteger) ||
+                deletedAt <= 0 || verifiedAt < deletedAt || exportedAt < verifiedAt ||
+                expiresAt < verifiedAt + graceMs || now < exportedAt) continue;
+            const canClean = !entry.sourceTrashPath && Number.isSafeInteger(resolvedAt) &&
+                resolvedAt >= exportedAt && now >= expiresAt && now - resolvedAt >= graceMs;
+            if (resolvedAt && !canClean) continue;
+            const snapshot = JSON.stringify(entry);
             try {
-                const saved = await this.readPhysicalBinary(exported);
-                const archived = await this.readPhysicalBinary(original);
-                const expectedBytes = Number(entry.contentBytes);
-                if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0 ||
-                    saved.byteLength !== expectedBytes ||
-                    archived.byteLength !== expectedBytes ||
-                    (await this.sha256Bytes(saved)) !== entry.contentHash ||
-                    (await this.sha256Bytes(archived)) !== entry.contentHash) {
-                    throw new Error("恢复导出文件或原档案字节校验失败，保留原档案");
+                await this.verifyOneDriveRecoveryExport(entry);
+                this.assertCurrent(operation);
+                if (!local.recoveryEntries?.includes(entry) || JSON.stringify(entry) !== snapshot) continue;
+                if (!resolvedAt) {
+                    resolved.set(entry, snapshot);
+                    continue;
                 }
-                const adapter: any = this.app.vault.adapter;
-                if (!(await adapter.exists(original))) {
-                    throw new Error("恢复档案物理位置缺失，请手动核查");
-                }
-                if (typeof adapter.remove !== "function") {
-                    throw new Error("宿主暂不支持安全清理隐藏恢复档案");
-                }
-                await adapter.remove(original);
-                if (await adapter.exists(original)) {
-                    throw new Error("原恢复档案磁盘删除未生效");
-                }
-            } catch (error: any) {
-                entry.cleanupError = safeOneDriveError(error);
-                retained.push(entry);
+                const adapter = this.app.vault.adapter;
+                if (!await adapter.trashSystem(entry.recoveryPath)) continue;
+                if (!await adapter.exists(entry.recoveryPath)) removed.add(entry);
+            } catch {
+                // Retain an unverifiable or inaccessible backup for another sync.
+                this.assertCurrent(operation);
             }
         }
-        local.recoveryEntries = retained;
-        await (this.store as any).save();
+        if (!resolved.size && !removed.size) return;
+        await this.store.saveWithIdentityGuard(() => this.assertCurrent(operation), () => {
+            const previous = local.recoveryEntries;
+            const changed = [...resolved].filter(([entry, snapshot]) =>
+                previous?.includes(entry) && JSON.stringify(entry) === snapshot);
+            const before = changed.map(([entry]) => [entry, entry.resolvedAt] as const);
+            for (const [entry] of changed) entry.resolvedAt = now;
+            const retained = previous?.filter(entry => !removed.has(entry));
+            local.recoveryEntries = retained;
+            return () => {
+                for (const [entry, old] of before) if (entry.resolvedAt === now) entry.resolvedAt = old;
+                if (local.recoveryEntries === retained) local.recoveryEntries = previous;
+            };
+        });
     }
 
     async isolateUnconfirmed(): Promise<void> {

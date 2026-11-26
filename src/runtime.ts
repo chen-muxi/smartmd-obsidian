@@ -686,8 +686,11 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             ? containerEl.querySelector<HTMLDetailsElement>(".smartmd-onedrive-pending-files")
             : null;
         const filesOpen = pendingDetails?.open ?? false;
+        const recoveryDetails = this.activePage === "onedrive"
+            ? containerEl.querySelector<HTMLDetailsElement>(".smartmd-onedrive-recoveries")
+            : null;
         const filesFocused = pendingDetails?.querySelector("summary") === containerEl.ownerDocument.activeElement;
-        const scrollContainer = pendingDetails?.closest(".vertical-tab-content");
+        const scrollContainer = (pendingDetails ?? recoveryDetails)?.closest(".vertical-tab-content");
         const scrollTop = scrollContainer?.scrollTop;
         this.refreshAiTest = undefined;
         containerEl.empty();
@@ -698,7 +701,8 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         const content = containerEl.createDiv({ cls: "smartmd-settings-content" });
         if (this.activePage === "home") this.homeSection(content);
         else if (this.activePage === "publish") this.publishSection(content);
-        else if (this.activePage === "onedrive" && this.runtime.supportsOneDrive) this.oneDriveSection(content, filesOpen);
+        else if (this.activePage === "onedrive" && this.runtime.supportsOneDrive)
+            this.oneDriveSection(content, filesOpen, recoveryDetails?.open ?? false);
         else if (this.activePage === "external" && this.runtime.supportsExternalFolderSync) this.externalSection(content);
         else if (this.activePage === "ai") this.aiSection(content);
         else if (this.activePage === "about") this.aboutSection(content);
@@ -1013,7 +1017,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         spaceSetting.addButton((button) => button.setButtonText(localize("管理")).setCta().onClick(() => this.runtime.publish.openManager()));
     }
 
-    private oneDriveSection(container: HTMLElement, filesOpen: boolean): void {
+    private oneDriveSection(container: HTMLElement, filesOpen: boolean, backupsOpen: boolean): void {
         const settings = this.runtime.oneDrive.settings();
         const pendingUploads = Object.keys(settings.pendingUploadOperations || {});
         const autoMode = settings.enabled ? settings.autoMode || "custom" : "manual";
@@ -1390,21 +1394,14 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
         const recoveries = this.runtime.oneDrive.listOneDriveRecoveries();
         if (recoveries.length) {
-            const area = container.createDiv({ cls: "smartmd-onedrive-recoveries" });
-            new Setting(area).setClass("smartmd-settings-subheading").setName(localize("OneDrive 独立恢复档案：") + recoveries.length + localize("项")).setHeading();
-            area.createEl("p", { text:
-                localize("未解决、无法验证或唯一副本不会自动销毁。需要先另存旧版并核验，再明确确认问题解决。") });
+            const area = container.createEl("details", { cls: "smartmd-onedrive-recoveries" });
+            area.open = backupsOpen;
+            area.createEl("summary", { text: localize("恢复备份（{0} 项）", recoveries.length) });
+            area.createEl("p", { text: localize("SmartMD 自动核验已另存的备份。需要找回旧内容时，可以在这里另存。") });
             for (const item of recoveries) {
                 const row = area.createDiv({ cls: "smartmd-card" });
                 row.createEl("strong", { text: String(item.relativePath || "未知文件") });
-                row.createEl("p", { text: localize("恢复 ID：") + String(item.id || "") });
-                row.createEl("p", { text: item.resolvedAt ? localize("已解决（保留缓冲）")
-                    : item.exportedAt ? localize("已单独导出，待确认解决")
-                        : localize("尚未解决，保留锁生效") });
-                if (item.cleanupError) {
-                    row.createEl("p", { cls: "smartmd-warning", text:
-                        localize("清理失败，恢复档案仍保留：") + localizeMessage(safeOneDriveError(item.cleanupError)) });
-                }
+                if (item.exportPath) row.createEl("p", { text: localize("已另存至 {0}", item.exportPath) });
                 if (Platform.isAndroidApp && item.sourceTrashPath) {
                     row.createEl("button", { text: localize("另存安卓回收原件") }).onclick = async () => {
                         try {
@@ -1413,24 +1410,15 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                         } catch (error: any) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); }
                     };
                 }
-                if (!item.exportedAt) {
-                    row.createEl("button", { text: localize("另存恢复副本，不覆盖原稿") }).onclick = async () => {
-                        try {
-                            const path = await this.runtime.oneDrive.exportOneDriveRecoveryToNewNote(item.id);
-                            new Notice(localize("旧版本已核验并另存至：") + path);
-                        } catch (error: any) {
-                            new Notice(localize("导出失败：") + localizeMessage(safeOneDriveError(error)), 8000);
-                        }
-                        this.display();
-                    };
-                } else if (!item.resolvedAt) {
-                    row.createEl("button", { text: localize("确认恢复问题已解决") }).onclick = async () => {
-                        if (!window.confirm(localize("确认已核验独立导出的恢复笔记？恢复档案将继续受7天缓冲保护。"))) return;
-                        try { await this.runtime.oneDrive.confirmOneDriveRecoveryResolved(item.id); }
-                        catch (error: any) { new Notice(localizeMessage(safeOneDriveError(error)), 8000); }
-                        this.display();
-                    };
-                }
+                row.createEl("button", { text: localize("另存备份") }).onclick = async () => {
+                    try {
+                        const path = await this.runtime.oneDrive.exportOneDriveRecoveryToNewNote(item.id);
+                        new Notice(localize("旧版本已核验并另存至：") + path);
+                    } catch (error: any) {
+                        new Notice(localize("导出失败：") + localizeMessage(safeOneDriveError(error)), 8000);
+                    }
+                    this.display();
+                };
             }
         }
         const sharingApproved = this.runtime.oneDrive.hasOneDriveSettingsSharingApproval();

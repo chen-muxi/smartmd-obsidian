@@ -1651,4 +1651,8 @@ export const englishMessages: Readonly<Record<string, string>> = {
     "本机文件在同步时变化，请重新同步。": "The local file changed during sync. Sync again to retry.",
     "已取消 OneDrive 文件检查，可以重试。": "OneDrive file check canceled. You can retry.",
     "OneDrive 检查超时（{0}）。已保留同步记录，可以重试。": "OneDrive check timed out ({0}). Your sync record was kept. You can retry.",
+    "恢复备份（{0} 项）": "Recovery backups ({0})",
+    "SmartMD 自动核验已另存的备份。需要找回旧内容时，可以在这里另存。": "SmartMD checks exported backups automatically. Save a copy here if you need an older version.",
+    "已另存至 {0}": "Copy saved to {0}",
+    "另存备份": "Save a backup copy",
 };
