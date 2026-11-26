@@ -1201,7 +1201,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         if (pendingUploads.length && this.runtime.oneDrive.canStartManualSync()) {
             const info = new Setting(container)
                 .setName(localize("有 {0} 个文件的上传尚未确认", pendingUploads.length))
-                .setDesc(localize("SmartMD 会在同步时向 OneDrive 核对这些文件。点「立即同步」可马上再查。其他文件照常同步。"));
+                .setDesc(localize("SmartMD 会在下次同步时核对这些文件，并按两端当前的内容继续处理。其他文件照常同步。"));
             const details = info.descEl.createEl("details", { cls: "smartmd-onedrive-pending-files" });
             details.open = filesOpen;
             details.createEl("summary", { text: localize("查看文件") });

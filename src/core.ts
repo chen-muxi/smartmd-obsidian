@@ -254,11 +254,11 @@ export class SmartMDStore {
         await this.persistSettings();
     }
 
-    async saveWithIdentityGuard(beforePersist: () => void): Promise<void> {
-        await this.persistSettings(beforePersist);
+    async saveWithIdentityGuard(beforePersist: () => void, apply?: () => () => void): Promise<void> {
+        await this.persistSettings(beforePersist, apply);
     }
 
-    private async persistSettings(beforePersist?: () => void): Promise<void> {
+    private async persistSettings(beforePersist?: () => void, apply?: () => () => void): Promise<void> {
         // All modules share data.json. An older background save must not finish
         // after a confirmed journal/baseline save and resurrect an earlier state.
         const operation = this.persistenceQueue.then(async () => {
@@ -267,14 +267,23 @@ export class SmartMDStore {
             beforePersist?.();
             // Freeze the same JSON representation the plugin persists, so an
             // in-flight writer never observes later in-memory phase changes.
-            const payload = JSON.parse(JSON.stringify({ ...raw, suiteV2: this.settings }));
-            if (this.preserveInactiveOneDrive) {
-                const previous = raw.suiteV2?.local?.oneDrive;
-                if (previous === undefined) delete payload.suiteV2.local.oneDrive;
-                else payload.suiteV2.local.oneDrive = previous;
+            const rollback = apply?.();
+            try {
+                const payload = JSON.parse(JSON.stringify({ ...raw, suiteV2: this.settings }));
+                if (this.preserveInactiveOneDrive) {
+                    const previous = raw.suiteV2?.local?.oneDrive;
+                    if (previous === undefined) delete payload.suiteV2.local.oneDrive;
+                    else payload.suiteV2.local.oneDrive = previous;
+                }
+                await this.plugin.saveData(payload);
+            } catch (error) {
+                rollback?.();
+                throw error;
             }
-            await this.plugin.saveData(payload);
-            for (const listener of this.listeners) listener();
+            for (const listener of this.listeners) {
+                try { listener(); }
+                catch (error) { console.error("SmartMD settings listener failed after save", error); }
+            }
         });
         // A failed write is still returned to its own caller, but does not poison
         // the queue or silently skip later safety checkpoints.
