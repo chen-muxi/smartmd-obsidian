@@ -24,6 +24,7 @@ class ExternalVersionChangedError extends Error {
 }
 
 const legacyReadbackFailure = "同步失败，原版本已保留：双端读回版本不一致，已保留备份";
+const legacyMissingPause = /^检测到外部 \d+ 篇文档批量缺失（疑似整目录移动或批量误操作），已触发防误删风暴熔断保护，同步已暂停。请在设置面板确认后再恢复。$/u;
 
 type ScannedFile = {
     relativePath: string;
@@ -1241,7 +1242,7 @@ export class ExternalSyncService {
     async syncAll(): Promise<void> {
         if (!Platform.isDesktopApp) return;
         for (const binding of this.bindings()) {
-            if (this.canRun(binding) || this.shouldRetryLegacyReadback(binding)) await this.syncBinding(binding);
+            if (this.canRun(binding) || this.shouldRetryLegacyPause(binding)) await this.syncBinding(binding);
         }
     }
 
@@ -1257,9 +1258,10 @@ export class ExternalSyncService {
         }
     }
 
-    private shouldRetryLegacyReadback(binding: any): boolean {
-        return binding.status === "failed"
-            && binding.lastError === legacyReadbackFailure
+    private shouldRetryLegacyPause(binding: any): boolean {
+        const readbackFailed = binding.status === "failed" && binding.lastError === legacyReadbackFailure;
+        const batchPaused = binding.status === "paused" && legacyMissingPause.test(binding.lastError);
+        return (readbackFailed || batchPaused)
             && binding.confirmed === true
             && binding.runAllowed !== true
             && !!binding.canonicalExternalPath
@@ -1269,13 +1271,13 @@ export class ExternalSyncService {
     }
 
     private async performSyncBinding(binding: any): Promise<void> {
-        if (Platform.isDesktopApp && this.shouldRetryLegacyReadback(binding)) {
+        if (Platform.isDesktopApp && this.shouldRetryLegacyPause(binding)) {
             try {
                 await this.assertBindingRoot(binding);
             } catch {
                 return;
             }
-            if (!this.bindings().includes(binding) || !this.shouldRetryLegacyReadback(binding)) return;
+            if (!this.bindings().includes(binding) || !this.shouldRetryLegacyPause(binding)) return;
             this.authority.confirm(binding);
         }
         if (
@@ -1340,20 +1342,9 @@ export class ExternalSyncService {
             let blockedByCapacity = 0;
             let filesChangedDuringScan = 0;
             let copiedFiles = 0;
-
-            // 防误删风暴小样本与全量抹除熔断机制 (Circuit Breaker)
-            const baselinePaths = Object.keys(previous).filter((p) => previous[p]?.externalHash);
-            const totalBaseline = baselinePaths.length;
-            const missingCount = baselinePaths.filter((p) => !external.has(p) && !unstablePaths.has(p)).length;
-            const isStorm = missingCount > 5 || (totalBaseline >= 2 && missingCount === totalBaseline) || (totalBaseline >= 5 && (missingCount / totalBaseline) > 0.2);
-            if (isStorm) {
-                await this.authority.stop(binding);
-                binding.status = "paused";
-                binding.lastError = `检测到外部 ${missingCount} 篇文档批量缺失（疑似整目录移动或批量误操作），已触发防误删风暴熔断保护，同步已暂停。请在设置面板确认后再恢复。`;
-                await (this.store as any).save();
-                new Notice(localize("[SmartMD] {0} 触发防误删风暴熔断保护：外部 {1} 篇文档缺失，已紧急暂停", binding.nickname, missingCount), 9000);
-                return;
-            }
+            let trashedFiles = 0;
+            let trashFailures = 0;
+            let preservedMirrors = 0;
 
             for (const relativePath of [...allPaths].sort()) {
                 if (!this.isCurrent(binding, ticket)) return;
@@ -1368,7 +1359,7 @@ export class ExternalSyncService {
                 }
 
                 // Quick stat-based skip MUST happen before any content read or hashing.
-                if (!waitingConflict && ext && local && old && old.externalHash && old.vaultHash && old.externalHash === old.vaultHash) {
+                if (!waitingConflict && ext && local && old && !old.systemRecycleStarted && old.externalHash && old.vaultHash && old.externalHash === old.vaultHash) {
                     const externalStable = old.externalMtimeMs !== undefined &&
                         old.externalMtimeMs === ext.mtimeMs && old.externalSize === ext.size;
                     const localStable = old.vaultMtime !== undefined &&
@@ -1483,17 +1474,18 @@ export class ExternalSyncService {
                             && old.vaultHash === local.hash
                         ) {
                             next[relativePath] = old;
-                        } else if (old?.protectedDelete === "external") {
-                            next[relativePath] = { ...old, vaultHash: local.hash };
-                            protectedDeletes++;
-                        } else if (old?.externalHash) {
-                            await this.createRecovery(binding, relativePath, local.content, "vault");
-                            next[relativePath] = {
-                                externalHash: "",
-                                vaultHash: local.hash,
-                                protectedDelete: "external",
-                            };
-                            protectedDeletes++;
+                        } else if (old?.externalHash || old?.protectedDelete === "external") {
+                            // The external file is gone. Only an unchanged mirror is obsolete.
+                            if (old.systemRecycleStarted || !old.externalHash ||
+                                old.externalHash !== old.vaultHash || old.vaultHash !== local.hash) {
+                                next[relativePath] = old;
+                                preservedMirrors++;
+                            } else if (await this.recycleMissingExternalMirror(binding, relativePath, old, fresh, ticket)) {
+                                trashedFiles++;
+                            } else {
+                                next[relativePath] = binding.fileStates[relativePath];
+                                trashFailures++;
+                            }
                         } else {
                             // 落实 P1-DEC-05: 知识库新建无基线 Markdown 必须挂起为 pendingExport，严禁静默外写
                             // 但若该文件已被规则排除（!FilterMatcher.isFileAccepted），则是 UNTRACKED_LOCAL，严禁标记 pendingExport！
@@ -1536,12 +1528,16 @@ export class ExternalSyncService {
             }
             if (!this.isCurrent(binding, ticket)) return;
             binding.fileStates = next;
-            binding.pendingCount = blockedByCapacity + filesChangedDuringScan;
-            if (copiedFiles || (!binding.lastSuccessAt && !binding.pendingCount)) binding.lastSuccessAt = Date.now();
-            binding.lastError = blockedByCapacity ? localize("恢复区已满，已跳过 {0} 个需要备份的文件。", blockedByCapacity)
+            binding.pendingCount = blockedByCapacity + filesChangedDuringScan + trashFailures;
+            if (copiedFiles || trashedFiles || (!binding.lastSuccessAt && !binding.pendingCount)) binding.lastSuccessAt = Date.now();
+            binding.lastError = trashFailures
+                ? localize("有 {0} 篇文档暂时无法移到系统回收站，会自动重试。", trashFailures)
+                : blockedByCapacity ? localize("恢复区已满，已跳过 {0} 个需要备份的文件。", blockedByCapacity)
                 : filesChangedDuringScan ? localize("有 {0} 个文件在同步时发生了变化，会自动重试。", filesChangedDuringScan)
+                : preservedMirrors
+                ? localize("已保留 {0} 篇无法确认是旧副本的知识库文档。", preservedMirrors)
                 : protectedDeletes
-                ? `${protectedDeletes} 项外部删除已停在恢复保护边界，知识库与 OneDrive 内容均未删除。`
+                ? localize("已保留 {0} 篇外部原稿。", protectedDeletes)
                 : "";
             binding.status = (binding.conflicts || []).length ? "conflict" : "active";
             await (this.store as any).save();
@@ -2564,6 +2560,51 @@ export class ExternalSyncService {
             if (stat?.isSymbolicLink() || (i < parts.length - 1 && stat && !stat.isDirectory())) {
                 throw new Error("外部路径包含链接或意外文件类型，拒绝跨目录操作");
             }
+        }
+    }
+
+    private async recycleMissingExternalMirror(
+        binding: any,
+        relativePath: string,
+        baseline: any,
+        observed: Awaited<ReturnType<ExternalSyncService["currentPair"]>>,
+        ticket: RunTicket,
+    ): Promise<boolean> {
+        if (!observed.vault || observed.external) return false;
+        const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & { getBasePath?: () => string };
+        const base = adapter.getBasePath?.();
+        if (!base || typeof adapter.trashSystem !== "function") return false;
+        const path = observed.vault.file.path;
+        const root = await this.fs.promises.realpath(base);
+        const absolute = this.path.resolve(root, path);
+        if (!inside(root, absolute, this.path)) return false;
+        const physical = await this.fs.promises.realpath(absolute).catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "EACCES" || error.code === "EPERM") return null;
+            return this.externalObservationError(error);
+        });
+        if (!physical || this.pathKey(physical) !== this.pathKey(absolute)) return false;
+        if (!this.isCurrent(binding, ticket)) return false;
+
+        // If the app exits during the OS move, never recycle a copy the user may have restored.
+        this.authority.beginFinal(ticket);
+        binding.fileStates[relativePath] = { ...baseline, systemRecycleStarted: true };
+        await (this.store as any).save();
+        let recycled = false;
+        let pathStillExists = true;
+        try {
+            const current = await this.currentPair(binding, relativePath);
+            if (current.external || current.vault?.file !== observed.vault.file || current.vault.hash !== observed.vault.hash) {
+                throw new ExternalVersionChangedError("移入回收站前，外部文件或知识库副本发生变化");
+            }
+            if (this.isCurrent(binding, ticket)) {
+                recycled = await adapter.trashSystem(path).catch(() => false);
+                if (!recycled) pathStillExists = await adapter.exists(path).catch(() => false);
+            }
+            return recycled;
+        } finally {
+            if (recycled) delete binding.fileStates[relativePath];
+            else if (pathStillExists) binding.fileStates[relativePath] = baseline;
+            await (this.store as any).save();
         }
     }
 
