@@ -28,7 +28,7 @@ import { redactOneDriveText, safeOneDriveError } from "./onedrive-error-redactio
 import { getAndroidVaultRoot } from "./onedrive-android-vault";
 import { PublishService } from "./publish";
 import { SmartKeepAuth } from "./smartkeep-auth";
-import { SyncFailureDiagnostic, SMARTKEEP_PUBLISH_URL } from "./types";
+import { SyncFailureDiagnostic, SMARTMD_PUBLISH_SITES } from "./types";
 
 
 export class SmartMDRuntime {
@@ -618,7 +618,7 @@ export class SmartMDRuntime {
         if (this.smartkeepAccountJob) return await this.smartkeepAccountJob;
         const job = (async () => {
             await this.smartkeepAuth.signIn((url) => window.open(url, "_blank"));
-            new Notice(localize("SmartKeep 账号登录成功"));
+            new Notice(localize("SmartMD 登录成功"));
         })();
         this.smartkeepAccountJob = job;
         try {
@@ -632,7 +632,7 @@ export class SmartMDRuntime {
         if (this.smartkeepAccountJob) return await this.smartkeepAccountJob;
         const job = (async () => {
             await this.smartkeepAuth.signOut();
-            new Notice(localize("已退出 SmartKeep MD，本地文件和发布内容未改变"));
+            new Notice(localize("已退出 SmartMD，本地文件和发布内容未改变"));
         })();
         this.smartkeepAccountJob = job;
         try {
@@ -955,17 +955,18 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
     private publishSection(container: HTMLElement): void {
         const local = (this.runtime.store as any).settings.local;
-        const shared = (this.runtime.store as any).settings.shared;
         const signedIn = this.runtime.isSmartKeepSignedIn();
+        const auth = this.runtime.smartkeepAuth;
+        const region = signedIn ? auth.activeRegion() : auth.preferredRegion();
         new Setting(container).setClass("smartmd-settings-section-title").setName(localize("云端发布")).setHeading();
-        container.createEl("p", { text: localize("SmartKeep MD 只保留最新版 Markdown 和问题反馈，不保存本地图片或正文历史版本。公开链接会自动保存到 SmartKeep，密码内容不会生成书签。") });
+        container.createEl("p", { text: localize("SmartMD 只保留最新版 Markdown 和问题反馈，不保存本地图片或正文历史版本。公开链接会自动保存到 SmartKeep，密码内容不会生成书签。") });
         new Setting(container)
             .setName(signedIn ? localize("发布账号：{0}", local.smartkeepAccountName) : localize("发布账号：尚未登录"))
             .setDesc(signedIn
                 ? localize("该 SmartKeep 账号用于确认发布内容所有者、管理问题反馈和保存公开发布链接。")
                 : localize("登录 SmartKeep 后才能发布；OneDrive 和自备模型 AI 不受影响。"))
             .addButton((button) => button
-                .setButtonText(signedIn ? localize("退出") : localize("登录 SmartKeep"))
+                .setButtonText(signedIn ? localize("退出") : localize("登录 SmartMD"))
                 .setCta()
                 .onClick(async () => {
                     try {
@@ -981,7 +982,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 }));
         new Setting(container)
             .setName(localize("发布服务地址"))
-            .setDesc(localize("正式发布入口固定为 {0}，普通设置不可修改。", SMARTKEEP_PUBLISH_URL));
+            .setDesc(localize("发布站点：{0}", SMARTMD_PUBLISH_SITES[region].publishUrl));
         const spaceSetting = new Setting(container)
             .setName(localize("发布空间"))
             .setDesc(this.runtime.publish.accountSpaceCount() === null
@@ -1956,13 +1957,13 @@ export class SmartMDSettingsTab extends PluginSettingTab {
 
         const mainSite = container.createDiv({ cls: "smartmd-about-section" });
         new Setting(mainSite).setClass("smartmd-settings-subheading").setName(localize("SmartKeep 主站")).setHeading();
-        mainSite.createEl("p", { text: localize("SmartKeep 是一个智能书签管理工具，可以帮助用户分类保存网页、整理资料、管理公开分享链接，并逐步形成个人网络知识入口。SmartKeep 负责书签和账号授权，SmartKeep MD 负责 Markdown 发布，两个站点不会自动读取彼此的私人内容。") });
-        mainSite.createEl("button", { text: localize("访问 SmartKeep"), cls: "mod-cta" }).onclick = () => window.open("https://smartkeep.me", "_blank");
+        mainSite.createEl("p", { text: localize("SmartKeep 是一个智能书签管理工具，可以帮助用户分类保存网页、整理资料、管理公开分享链接，并逐步形成个人网络知识入口。SmartKeep 负责书签和账号授权，SmartMD 负责 Markdown 发布，两个站点不会自动读取彼此的私人内容。") });
+        mainSite.createEl("button", { text: localize("访问 SmartKeep"), cls: "mod-cta" }).onclick = () => window.open(SMARTMD_PUBLISH_SITES[this.runtime.smartkeepAuth.preferredRegion()].mainUrl, "_blank");
 
         const contact = container.createDiv({ cls: "smartmd-about-section" });
         new Setting(contact).setClass("smartmd-settings-subheading").setName(localize("联系管理员")).setHeading();
         contact.createEl("p", { text: localize("管理员邮箱：support@smartkeep.me。反馈问题时建议附上插件版本、设备类型和问题现象；涉及资料安全时请在标题中注明“数据安全问题”。") });
-        contact.createEl("button", { text: localize("发送邮件") }).onclick = () => window.open("mailto:support@smartkeep.me?subject=SmartKeep%20Connect%20问题反馈", "_blank");
+        contact.createEl("button", { text: localize("发送邮件") }).onclick = () => window.open("mailto:support@smartkeep.me?subject=SmartMD%20问题反馈", "_blank");
 
         const roadmap = container.createDiv({ cls: "smartmd-about-section" });
         new Setting(roadmap).setClass("smartmd-settings-subheading").setName(localize("未来更新计划")).setHeading();

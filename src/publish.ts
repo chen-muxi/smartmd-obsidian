@@ -16,7 +16,8 @@ import {
     PublishedSpace,
     PublishPendingOperation,
     PublishScope,
-    SMARTKEEP_PUBLISH_URL,
+    type PublishRegion,
+    SMARTMD_PUBLISH_SITES,
 } from "./types";
 import { OperationAuthority, RunState, RunTicket } from "./operation-authority";
 
@@ -159,7 +160,7 @@ export class PublishSetupModal extends Modal {
         let titleInput: HTMLInputElement | null = null;
         new Setting(this.contentEl)
             .setName(localize("发布空间名称"))
-            .setDesc(localize("在 SmartKeep MD 与书签中展示的名称"))
+            .setDesc(localize("在 SmartMD 与书签中展示的名称"))
             .addText((text) => {
                 text.setValue(this.preview.scope.title).setPlaceholder(localize("例如：我的技术笔记"));
                 titleInput = text.inputEl;
@@ -288,12 +289,14 @@ export class PublishManagerModal extends Modal {
         this.contentEl.createEl("p", { text: localize("空间属于 SmartKeep 账号。所有知识库共用最多 3 个名额；撤回不需要本地原稿，更新正文仍需关联当前知识库。") });
         const count = this.service.accountSpaceCount();
         this.contentEl.createEl("p", { text: count === null ? localize("账号空间：待查询") : localize("账号空间：{0}/3（所有知识库共用）", count) });
+        const isCurrent = this.service.sessionGuard();
         const spaces = this.service.accountSpaces();
         if (!spaces.length) {
             this.contentEl.createEl("p", { text: localize("暂无发布空间。请在文档或文件夹菜单中选择发布。") });
             return;
         }
         for (const space of spaces) {
+            const canAct = () => isCurrent() && this.service.accountSpaces().includes(space);
             const card = this.contentEl.createDiv({ cls: "smartmd-card" });
             card.createEl("h3", { text: space.title });
             card.createEl("p", {
@@ -326,14 +329,16 @@ export class PublishManagerModal extends Modal {
                     ? "确认用当前本地内容重试更新"
                     : space.pendingOperation.action === "withdraw" ? "确认重试撤回" : "确认重试访问设置";
                 actions.createEl("button", { text: localizeMessage(label), cls: "mod-cta" }).onclick = async () => {
+                    if (!canAct()) return;
                     await this.service.retryOperation(space.id);
                     await this.render();
                 };
             }
             if (this.service.canWithdraw(space) && !space.pendingOperation) {
                 actions.createEl("button", { text: localize("撤回空间") }).onclick = async () => {
-                    if (!this.service.reserveConfirmation(space.id, "withdraw")) return;
+                    if (!canAct() || !this.service.reserveConfirmation(space.id, "withdraw")) return;
                     const approved = await confirm(this.app, localize("撤回发布空间"), localize("确认撤回账号空间“{0}”？\n{1}\n其中 {2} 篇云端正文和留言将不再可访问，并释放 1 个账号名额；任何知识库中的本地文件都不会改变。", space.title, space.url, space.documents.length), localize("确认撤回"));
+                    if (!canAct()) return;
                     if (approved) await this.service.withdrawSpace(space.id, false, true);
                     else await this.service.cancelReservedConfirmation(space.id);
                     await this.render();
@@ -346,6 +351,7 @@ export class PublishManagerModal extends Modal {
             if (!this.service.canRun(space)) {
                 if (this.service.canConfirm(space)) {
                     actions.createEl("button", { text: localize("确认账号与范围并恢复"), cls: "mod-cta" }).onclick = async () => {
+                        if (!canAct()) return;
                         await this.service.confirmLegacySpace(space.id);
                         await this.render();
                     };
@@ -358,27 +364,32 @@ export class PublishManagerModal extends Modal {
                 new Notice(localize("发布链接已复制"));
             };
             actions.createEl("button", { text: localize("立即同步到云端") }).onclick = async () => {
+                if (!canAct()) return;
                 await this.service.updateSpace(space.id, true, true);
                 await this.render();
             };
             if (space.pendingDocuments.length) {
                 actions.createEl("button", { text: localize("立即同步新增文档"), cls: "mod-cta" }).onclick = async () => {
+                    if (!canAct()) return;
                     await this.service.approvePending(space.id);
                     await this.render();
                 };
             }
             if (space.pendingDeletes.length) {
                 actions.createEl("button", { text: localize("同步删除 {0} 篇", space.pendingDeletes.length) }).onclick = async () => {
+                    if (!canAct()) return;
                     await this.service.confirmPendingDeletes(space.id);
                     await this.render();
                 };
             }
             actions.createEl("button", { text: space.access === "public" ? localize("改为密码访问") : localize("改为公开") }).onclick = async () => {
+                if (!canAct()) return;
                 await this.service.toggleAccess(space.id);
                 await this.render();
             };
             if (["detached", "user_removed"].includes(space.bookmarkStatus)) {
                 actions.createEl("button", { text: localize("重新生成书签") }).onclick = async () => {
+                    if (!canAct()) return;
                     await this.service.retryBookmark(space.id);
                     await this.render();
                 };
@@ -390,7 +401,7 @@ export class PublishManagerModal extends Modal {
 
 class FeedbackModal extends Modal {
     private deleting = new Set<string>();
-    constructor(app: App, private service: PublishService, private space: PublishedSpace, private feedback: any[], private documentTitle?: string) {
+    constructor(app: App, private service: PublishService, private space: PublishedSpace, private feedback: any[], private isCurrent: () => boolean, private documentTitle?: string) {
         super(app);
     }
 
@@ -419,7 +430,7 @@ class FeedbackModal extends Modal {
                 remove.disabled = true;
                 try {
                     const approved = await confirm(this.app, localize("删除意见"), localize("确认删除这条修改意见？删除后无法恢复，文章正文和其他意见不受影响。"), localize("确认删除"));
-                    if (!approved) return;
+                    if (!approved || !this.isCurrent()) return;
                     await this.service.deleteFeedback(this.space.id, item.id);
                     this.feedback = this.feedback.filter(feedback => feedback.id !== item.id);
                     this.render();
@@ -433,6 +444,7 @@ class FeedbackModal extends Modal {
             };
             if (item.status !== "open") continue;
             actions.createEl("button", { text: localize("标记已解决"), cls: "mod-cta" }).onclick = async () => {
+                if (!this.isCurrent()) return;
                 await this.service.setFeedbackStatus(this.space.id, item.id, "resolved", "已在本地处理并同步最新版");
                 item.status = "resolved";
                 item.resolution = "已在本地处理并同步最新版";
@@ -441,6 +453,7 @@ class FeedbackModal extends Modal {
             actions.createEl("button", { text: localize("不采纳") }).onclick = async () => {
                 const reason = window.prompt(localize("请填写不采纳的简短理由"));
                 if (!reason?.trim()) return;
+                if (!this.isCurrent()) return;
                 await this.service.setFeedbackStatus(this.space.id, item.id, "rejected", reason.trim());
                 item.status = "rejected";
                 item.resolution = reason.trim();
@@ -589,6 +602,15 @@ export class PublishService {
         return shared.publishTombstones;
     }
 
+    sessionGuard(): () => boolean {
+        const epoch = this.reconciliationEpoch;
+        const region = this.auth.activeRegion();
+        const account = this.store.settings.local.smartkeepAccountId;
+        return () => !this.disposed && !this.signingOut && this.auth.isSignedIn() &&
+            epoch === this.reconciliationEpoch && region === this.auth.activeRegion() &&
+            account === this.store.settings.local.smartkeepAccountId;
+    }
+
     subscribeStatus(listener: () => void): () => void {
         return (this.store as any).subscribe?.(listener) || (() => {});
     }
@@ -599,7 +621,8 @@ export class PublishService {
             space?.localId,
             space?.remoteId,
             space?.code,
-        ].map((value) => String(value || "")).filter(Boolean)));
+        ].map((value) => String(value || "")).filter(Boolean)
+            .map(value => this.auth.activeRegion() === "me" ? "me:" + value : value)));
     }
 
     private markWithdrawn(space: any): void {
@@ -625,7 +648,8 @@ export class PublishService {
 
     private hasRunPermission(space: PublishedSpace): boolean {
         const local = (this.store as any).settings.local;
-        return this.authority.canRun(space as PublishedSpace & RunState)
+        return (space.publishRegion ?? "cn") === this.auth.activeRegion()
+            && this.authority.canRun(space as PublishedSpace & RunState)
             && (space as any).confirmationScope === `${space.scope.type}:${space.scope.path}`
             && (space as any).confirmationAccount === String(local.smartkeepAccountId || "");
     }
@@ -643,7 +667,7 @@ export class PublishService {
     }
 
     canWithdraw(space: PublishedSpace): boolean {
-        return !this.publishWritesPaused() && this.accountSpaces().some((item) => item.id === space.id);
+        return !this.publishWritesPaused() && this.accountSpaces().includes(space);
     }
 
     isBusy(space: PublishedSpace): boolean {
@@ -716,13 +740,14 @@ export class PublishService {
         const files = this.app.vault.getMarkdownFiles().filter((file) => scopeContains(space.scope, file.path));
         if (!files.length) throw new Error("原发布范围当前不存在，无法解除升级保护");
         const scope = space.scope.type === "vault" ? "整个知识库" : space.scope.path;
+        const isCurrent = this.sessionGuard();
         const approved = await confirm(
             this.app,
             localize("确认旧发布空间"),
             localize("请确认当前账号拥有“{0}”，并确认继续使用原范围：{1}。确认后恢复此范围 Markdown 新增、修改和删除的持续同步。", space.title, scope),
             localize("确认并恢复"),
         );
-        if (!approved) return;
+        if (!approved || !isCurrent() || !this.spaces().includes(space)) return;
         this.authority.confirm(space as PublishedSpace & RunState);
         (space as any).confirmationScope = `${space.scope.type}:${space.scope.path}`;
         (space as any).confirmationAccount = (this.store as any).settings.local.smartkeepAccountId || "";
@@ -749,6 +774,8 @@ export class PublishService {
         this.deferredUpdates.clear();
         this.reconciliationEpoch++;
         this.reconciliationJob = null;
+        this.accountSpaceIds.clear();
+        this.accountSpaceAccount = "";
         this.clearFeedbackSummary();
         for (const timer of this.updateTimers.values()) window.clearTimeout(timer);
         this.updateTimers.clear();
@@ -782,11 +809,34 @@ export class PublishService {
     }
 
     hasPendingCreates(): boolean {
-        return Object.keys((this.store as any).settings.local.pendingPublishCreates || {}).length > 0;
+        const local = this.store.settings.local;
+        const region = this.auth.activeRegion();
+        return Object.values((local as any).pendingPublishCreates || {}).some((item: any) =>
+            (item.publishRegion ?? "cn") === region && (!item.account || item.account === local.smartkeepAccountId),
+        );
     }
 
     spaces(): PublishedSpace[] {
+        const region = this.auth.activeRegion();
+        return this.allSpaces().filter(space => (space.publishRegion ?? "cn") === region);
+    }
+
+    private allSpaces(): PublishedSpace[] {
         return ((this.store as any).settings?.shared?.publishSpaces || []) as PublishedSpace[];
+    }
+
+    private rememberSpace(space: PublishedSpace): void {
+        const spaces = this.allSpaces();
+        const index = spaces.findIndex(item => item.id === space.id &&
+            (item.publishRegion ?? "cn") === (space.publishRegion ?? "cn"));
+        if (index >= 0) spaces.splice(index, 1, space);
+        else spaces.push(space);
+    }
+
+    private forgetSpace(space: PublishedSpace): void {
+        const spaces = this.allSpaces();
+        const index = spaces.indexOf(space);
+        if (index >= 0) spaces.splice(index, 1);
     }
 
     openManager(): void {
@@ -917,7 +967,8 @@ export class PublishService {
             }
             for (const remote of remoteById.values() as any) {
                 this.clearWithdrawn(remote);
-                this.spaces().push({
+                this.rememberSpace({
+                    publishRegion: this.auth.activeRegion(),
                     id: String(remote.id),
                     code: String(remote.code || ""),
                     title: String(remote.title || "未命名发布空间"),
@@ -976,7 +1027,8 @@ export class PublishService {
     publishedLink(path: string): { url: string; documentPublished: boolean; spaceId: string } | null {
         const account = String((this.store as any).settings.local.smartkeepAccountId || "");
         const target = normalize(path);
-        if (!account) return null;
+        if (!account || !this.auth.isSignedIn()) return null;
+        const base = this.auth.serverBase();
         const candidates = this.spaces().filter((space) =>
             space.scopeKnown !== false && space.reconciliationStatus !== "remote_withdrawn"
             && Boolean(space.code) && space.documents.length > 0
@@ -990,11 +1042,11 @@ export class PublishService {
             const document = space.documents.find((doc) => normalize(doc.localPath) === target);
             if (document) {
                 const encoded = normalize(document.publicPath).split("/").map(encodeURIComponent).join("/");
-                return { url: `${SMARTKEEP_PUBLISH_URL}/s/${encodeURIComponent(space.code)}/${encoded}`, documentPublished: true, spaceId: space.id };
+                return { url: `${base}/s/${encodeURIComponent(space.code)}/${encoded}`, documentPublished: true, spaceId: space.id };
             }
         }
         const space = candidates.sort((a, b) => normalize(b.scope.path).length - normalize(a.scope.path).length)[0];
-        return space ? { url: `${SMARTKEEP_PUBLISH_URL}/s/${encodeURIComponent(space.code)}/`, documentPublished: false, spaceId: space.id } : null;
+        return space ? { url: `${base}/s/${encodeURIComponent(space.code)}/`, documentPublished: false, spaceId: space.id } : null;
     }
 
     openPublishedLink(file: TAbstractFile): void {
@@ -1028,16 +1080,22 @@ export class PublishService {
             return;
         }
         if (this.hasBlockingFailure()) return void new Notice(localize("发布状态尚未恢复，请先使用“重新对账”"));
-        const previewKey = `${scope.type}:${normalize(scope.path)}`;
+        const isCurrent = this.sessionGuard();
+        const previewKey = `${this.auth.activeRegion()}:${scope.type}:${normalize(scope.path)}`;
         if (this.activePreviews.has(previewKey)) return void new Notice(localize("该发布范围正在准备中，请勿重复操作"));
         this.activePreviews.add(previewKey);
         try {
             const preview = await this.preview(scope);
+            if (!isCurrent()) {
+                this.activePreviews.delete(previewKey);
+                return;
+            }
             if (!preview.files.length) {
                 this.activePreviews.delete(previewKey);
                 return void new Notice(localize("所选范围内没有 Markdown 文档"));
             }
             new PublishSetupModal(this.app, preview, async (options) => {
+                if (!isCurrent()) throw new Error("发布登录已变化，请重新开始操作");
                 await this.createSpace(preview, options);
             }, () => this.activePreviews.delete(previewKey)).open();
         } catch (error: any) {
@@ -1070,8 +1128,11 @@ export class PublishService {
         let remoteId = "";
         const local = (this.store as any).settings.local;
         local.pendingPublishCreates = local.pendingPublishCreates || {};
+        const region = this.auth.activeRegion();
         const existingPending = Object.values(local.pendingPublishCreates).find((item: any) =>
-            item.title === options.title
+            (item.publishRegion ?? "cn") === region
+            && (!item.account || item.account === local.smartkeepAccountId)
+            && item.title === options.title
             && item.access === options.access
             && item.scope?.type === preview.scope.type
             && normalize(item.scope?.path || "") === normalize(preview.scope.path),
@@ -1079,6 +1140,8 @@ export class PublishService {
         const requestId = String(existingPending?.requestId || id("create"));
         const syncId = requestId;
         local.pendingPublishCreates[requestId] = {
+            publishRegion: region,
+            account: local.smartkeepAccountId,
             requestId,
             syncId,
             title: options.title,
@@ -1124,6 +1187,7 @@ export class PublishService {
             }
             if (!remoteId) throw new Error("发布已被服务接受，但未能确认新空间身份；已停止后续上传");
             const space: PublishedSpace = {
+                publishRegion: region,
                 id: remoteId,
                 code: resolved.code || "",
                 title: options.title,
@@ -1170,9 +1234,7 @@ export class PublishService {
             space.operationStatus = "success";
             space.reconciliationStatus = "matched";
             space.statusMessage = "云端已确认完整首个版本";
-            const recoveredIndex = this.spaces().findIndex((item) => item.id === space.id);
-            if (recoveredIndex >= 0) this.spaces().splice(recoveredIndex, 1, space);
-            else this.spaces().push(space);
+            this.rememberSpace(space);
             if (this.accountSpaceAccount === String(local.smartkeepAccountId || "")) this.accountSpaceIds.add(space.id);
             delete local.pendingPublishCreates[requestId];
             await (this.store as any).save();
@@ -1414,6 +1476,7 @@ export class PublishService {
         if (this.hasBlockingFailure() && !retry) throw new Error("发布状态尚未恢复，请先重新对账");
         if (this.isBusy(space)) throw new Error("发布操作正在进行中，请等待本次结果");
         if (space.operationStatus === "failed" && !retry) throw new Error("上次操作失败，请使用唯一的重试入口");
+        const isCurrent = this.sessionGuard();
         const reusable = retry && space.pendingOperation?.action === "access" ? space.pendingOperation : null;
         const access = reusable?.desiredAccess || (space.access === "public" ? "password" : "public");
         if (!reusable) {
@@ -1431,13 +1494,15 @@ export class PublishService {
         if (access === "password") {
             password = window.prompt(localize("请输入至少 6 个字符的访问密码")) || "";
             if (password.length < 6) {
-                await this.cancelReservedConfirmation(spaceId);
+                if (isCurrent()) await this.cancelReservedConfirmation(spaceId);
                 return void new Notice(localize("访问密码至少需要 6 个字符"));
             }
         } else {
             const proceed = await confirm(this.app, localize("改为公开访问"), localize("公开后页面可被搜索引擎收录，发布链接也会自动保存到 SmartKeep。"), localize("确认公开"));
+            if (!isCurrent()) return;
             if (!proceed) return await this.cancelReservedConfirmation(spaceId);
         }
+        if (!isCurrent() || !this.canRun(space)) return;
         const ticket = this.authority.start(space as PublishedSpace & RunState);
         const pending: PublishPendingOperation = space.pendingOperation!;
         if (!pending.expectedVersion) pending.expectedVersion = await this.currentSpaceVersion(spaceId);
@@ -1652,7 +1717,7 @@ export class PublishService {
             resolution: item.resolution || "",
         }));
         const title = documentId ? space.documents.find(doc => doc.id === documentId)?.localPath.split("/").pop() : undefined;
-        new FeedbackModal(this.app, this, space, feedback, title).open();
+        new FeedbackModal(this.app, this, space, feedback, this.sessionGuard(), title).open();
     }
 
     private async mutateFeedback(spaceId: string, action: (beforeSend: () => void) => Promise<any>): Promise<any> {
@@ -1738,9 +1803,7 @@ export class PublishService {
             }, [], requireWithdrawal);
             this.markWithdrawn(existing);
             this.accountSpaceIds.delete(spaceId);
-            const spaces = this.spaces();
-            const index = spaces.findIndex((item) => item.id === spaceId);
-            if (index >= 0) spaces.splice(index, 1);
+            this.forgetSpace(existing);
             this.feedbackChanged?.();
             await (this.store as any).save();
         } catch (error: any) {
@@ -1762,10 +1825,12 @@ export class PublishService {
     }
 
     private async api<T = any>(method: string, path: string, body?: unknown, acceptedStatuses: number[] = [], beforeSend?: () => void, quiet = false): Promise<T> {
-        const base = SMARTKEEP_PUBLISH_URL;
         const epoch = this.reconciliationEpoch;
-        const token = await this.auth.getAccessToken();
+        const { base, token } = await this.auth.getPublishSession();
         try {
+            if (epoch !== this.reconciliationEpoch || this.disposed || this.signingOut) {
+                throw new Error("发布登录已变化，请重新开始操作");
+            }
             beforeSend?.();
             const response = await requestUrl({
                 url: `${base}${path}`,
@@ -1814,10 +1879,12 @@ export class PublishService {
     private async reconcilePendingCreates(isCurrent: () => boolean): Promise<void> {
         const local = (this.store as any).settings.local;
         const pending = local.pendingPublishCreates || {};
+        const region = this.auth.activeRegion();
         let changed = false;
         for (const requestId of Object.keys(pending)) {
             if (!isCurrent()) return;
             const item = pending[requestId];
+            if ((item.publishRegion ?? "cn") !== region || (item.account && item.account !== local.smartkeepAccountId)) continue;
             let result: any;
             try {
                 result = await this.api<any>("GET", `/api/v1/spaces/requests/${requestId}`, undefined, [404]);
@@ -1842,6 +1909,7 @@ export class PublishService {
             }
             let space = this.spaces().find((entry) => entry.id === remote.id);
             if (!space) space = {
+                publishRegion: region,
                 id: remote.id,
                 code: remote.code || "",
                 title: remote.title || item.title,
@@ -1865,7 +1933,7 @@ export class PublishService {
                 confirmationScope: `${item.scope.type}:${item.scope.path}`,
                 confirmationAccount: String(local.smartkeepAccountId || ""),
             } as PublishedSpace;
-            if (!this.spaces().includes(space)) this.spaces().push(space);
+            if (!this.spaces().includes(space)) this.rememberSpace(space);
             try {
                 this.applyRecoveredCreate(space, operation.result || {});
                 space.operationStatus = "success";
@@ -1931,8 +1999,7 @@ export class PublishService {
         if (pending.action === "withdraw") {
             this.accountSpaceIds.delete(space.id);
             this.markWithdrawn(space);
-            const index = this.spaces().findIndex((item) => item.id === space.id);
-            if (index >= 0) this.spaces().splice(index, 1);
+            this.forgetSpace(space);
             return "committed";
         }
         space.cloudVersion = Number(result.result?.version || space.cloudVersion || 0);

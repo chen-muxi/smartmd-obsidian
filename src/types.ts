@@ -29,7 +29,10 @@ export interface PublishedDocument {
     url?: string;
 }
 
+export type PublishRegion = "cn" | "me";
+
 export interface PublishedSpace {
+    publishRegion?: PublishRegion;
     id: string;
     code: string;
     title: string;
@@ -399,7 +402,13 @@ export interface SyncPreview {
     skippedLargeFiles: number;
 }
 
-export const SMARTKEEP_PUBLISH_URL = "https://md.smartkeep.cn";
+export const SMARTMD_PUBLISH_SITES = {
+    cn: { mainUrl: "https://smartkeep.cn", accountUrl: "https://account.smartkeep.cn/login", publishUrl: "https://md.smartkeep.cn" },
+    me: { mainUrl: "https://smartkeep.me", accountUrl: "https://account.smartkeep.me/login", publishUrl: "https://md.smartkeep.me" },
+} as const;
+
+// Compatibility value in the legacy OneDrive settings format.
+export const SMARTKEEP_PUBLISH_URL = SMARTMD_PUBLISH_SITES.cn.publishUrl;
 
 export const DEFAULT_SETTINGS: SmartMDSettings = {
     schemaVersion: 2,
