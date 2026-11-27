@@ -24,7 +24,7 @@ import { getDevicePlatformName, MicrosoftAuth, SmartMDStore } from "./core";
 import { MicrosoftDeviceCodeModal } from "./microsoft-device-modal";
 import { ExternalSyncService } from "./external-sync";
 import { OneDriveSyncService } from "./onedrive";
-import { safeOneDriveError } from "./onedrive-error-redaction";
+import { redactOneDriveText, safeOneDriveError } from "./onedrive-error-redaction";
 import { getAndroidVaultRoot } from "./onedrive-android-vault";
 import { PublishService } from "./publish";
 import { SmartKeepAuth } from "./smartkeep-auth";
@@ -1202,10 +1202,14 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         // but deliberately has no "release", "retry" or "delete" button.
         const pendingUnknown = Object.entries(settings.pendingUploadOperations || {})
             .filter(([, record]: [string, any]) => record && this.runtime.oneDrive.canAuditUnknownUpload(record));
-        if (pendingUploads.length && this.runtime.oneDrive.canStartManualSync()) {
+        const hasUploadReceipt = pendingUploads.some(path => {
+            const receipt = settings.pendingUploadOperations?.[path];
+            return receipt?.contentAcknowledgedId && receipt.contentAcknowledgedEtag;
+        });
+        if (pendingUploads.length && (this.runtime.oneDrive.canStartManualSync() || hasUploadReceipt)) {
             const info = new Setting(container)
-                .setName(localize("有 {0} 个文件的上传尚未确认", pendingUploads.length))
-                .setDesc(localize("SmartMD 会在下次同步时核对这些文件，并按两端当前的内容继续处理。其他文件照常同步。"));
+                .setName(localize("正在核对 {0} 个文件", pendingUploads.length))
+                .setDesc(localize("SmartMD 会自动核对上传结果，其他文件照常同步。"));
             const details = info.descEl.createEl("details", { cls: "smartmd-onedrive-pending-files" });
             details.open = filesOpen;
             details.createEl("summary", { text: localize("查看文件") });
@@ -1482,7 +1486,11 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         }
 
         const summary = settings.lastSyncSummary;
-        const diagnostics: SyncFailureDiagnostic[] = settings.failedDiagnostics || [];
+        const savedDiagnostics: SyncFailureDiagnostic[] = settings.failedDiagnostics || [];
+        const checkingPaths = new Set(pendingUploads.map(path => redactOneDriveText(path)));
+        const isLegacyRecheck = (diag: SyncFailureDiagnostic) =>
+            diag.evidence?.rawErrorMessage?.startsWith("状态复核后再次变化：");
+        const diagnostics = savedDiagnostics.filter(diag => !checkingPaths.has(diag.relativePath) && !isLegacyRecheck(diag));
 
         if (summary) {
             const summaryDiv = container.createEl("div", { cls: "smartmd-sync-summary" });
@@ -1491,14 +1499,18 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             const summaryTitle = summaryDiv.createEl("div");
             summaryTitle.addClass("smartmd-sync-summary-title");
 
+            const hiddenFailures = savedDiagnostics.length - diagnostics.length;
+            const failed = Math.max(0, summary.failed - hiddenFailures);
             const outcome = summary.outcome ?? (summary.finishedAt <= settings.lastSuccessAt ? "complete"
-                : summary.failed > 0 && summary.success > 0 ? "partial" : "incomplete");
-            const pendingCount = summary.pendingUploads ?? pendingUploads.length;
-            const statusBadge = outcome === "complete"
-                ? (pendingCount ? "🟡 其他文件已同步，有文件待核对" : "🟢 全部同步成功")
-                : outcome === "partial"
-                    ? "🟡 部分同步完成 (已隔离失败项)"
-                    : "🔴 同步未完成";
+                : failed > 0 && summary.success > 0 ? "partial" : "incomplete");
+            const legacyRechecks = savedDiagnostics.filter(diag =>
+                !checkingPaths.has(diag.relativePath) && isLegacyRecheck(diag),
+            ).length;
+            const pendingCount = pendingUploads.length + (summary.pendingRechecks ?? legacyRechecks);
+            const statusBadge = !failed && pendingCount ? "🟡 正在核对"
+                : outcome === "complete" ? "🟢 全部同步成功"
+                : outcome === "partial" ? "🟡 部分同步完成 (已隔离失败项)"
+                : "🔴 同步未完成";
             summaryTitle.createSpan({ text: localize("上次同步汇报：{0}", localizeMessage(statusBadge)) });
             if (summary.durationMs) {
                 summaryTitle.createSpan({
@@ -1512,10 +1524,10 @@ export class SmartMDSettingsTab extends PluginSettingTab {
             const counts: Array<[string, number, string?]> = [
                 ["总计", summary.total],
                 ["成功", summary.success, "smartmd-sync-count-success"],
-                ["失败", summary.failed, summary.failed > 0 ? "smartmd-sync-count-failed" : undefined],
+                ["失败", failed, failed > 0 ? "smartmd-sync-count-failed" : undefined],
                 ["未变更", summary.unchanged],
             ];
-            if (pendingCount) counts.push(["待核对", pendingCount]);
+            if (pendingCount) counts.push(["正在核对", pendingCount]);
             for (const [label, count, cls] of counts) {
                 const item = statsRow.createSpan({ text: localize(label) + ": ", cls });
                 item.createEl("b", { text: String(count) });
@@ -1559,7 +1571,9 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 evDiv.addClass("smartmd-diagnostic-evidence");
                 const ev = diag.evidence || {} as any;
                 evDiv.createEl("b", { text: localize("【凭什么失败】 ") });
-                evDiv.createSpan({ text: `HTTP ${ev.httpStatus || 0} (${ev.gatewayErrorCode || localize("未知代码")})` });
+                evDiv.createEl("span", { text: ev.httpStatus > 0
+                    ? "HTTP " + ev.httpStatus + " (" + (ev.gatewayErrorCode || localize("未知代码")) + ")"
+                    : localize("未记录 HTTP 状态码") });
                 if (ev.requestId) {
                     evDiv.createSpan({ text: " | Request-ID: " });
                     evDiv.createEl("code", { text: ev.requestId });
@@ -1569,7 +1583,10 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                 const reasonDiv = card.createEl("div");
                 reasonDiv.addClass("smartmd-diagnostic-reason");
                 reasonDiv.createEl("b", { text: localize("【为什么失败】 ") });
-                reasonDiv.createSpan({ text: [localizeMessage(diag.humanReason), localizeMessage(diag.humanExplanation)].join(" · ") });
+                const explanation = !ev.httpStatus && diag.category === "UNKNOWN_ERROR"
+                    ? localize("这次同步没有记录到 OneDrive 的 HTTP 响应。")
+                    : [localizeMessage(diag.humanReason), localizeMessage(diag.humanExplanation)].join(" · ");
+                reasonDiv.createSpan({ text: explanation });
 
                 // 要怎么调整才能不失败（行动指南）
                 const remDiv = card.createEl("div");

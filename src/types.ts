@@ -134,6 +134,7 @@ export interface SyncSummary {
     failed: number;
     unchanged: number;
     pendingUploads?: number;
+    pendingRechecks?: number;
     outcome?: "complete" | "partial" | "incomplete";
     /** Saved conflict copies are unresolved, not successful synchronized files. */
     conflicts?: number;
@@ -204,6 +205,8 @@ export interface OneDriveSyncSettings {
         motherPath: string; direction: "upload";
         sourceSha256: string; sourceBytes: number; sourceMtime?: number; sourceBaseline?: string;
         contentAcknowledgedId?: string; contentAcknowledgedEtag?: string;
+        /** Last post-upload check that did not complete. Safe to inspect in local diagnostics. */
+        verificationStep?: "timestamp" | "readback";
         legacyTimestampFailure?: boolean; verifiedRemoteMtime?: number;
         expectedRemoteId: string; expectedRemoteEtag: string;
         stagingPath: string;

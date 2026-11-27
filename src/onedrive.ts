@@ -3371,6 +3371,7 @@ export class OneDriveSyncService {
             let successCount = 0;
             let unchangedCount = 0;
             let pendingUploadCount = 0;
+            let pendingRechecks = 0;
             const startTime = Date.now();
             const failedDiagnostics: SyncFailureDiagnostic[] = [];
             let deletionInventory: Promise<{ rootId: string; files: RemoteFile[] }> | undefined;
@@ -3594,8 +3595,8 @@ export class OneDriveSyncService {
                                 }
                                 const current = this.app.vault.getAbstractFileByPath(path) as TFile | null;
                                 next[path] = {
-                                    localMtime: current?.stat.mtime || localItem.mtime,
-                                    localSize: current?.stat.size || localItem.size,
+                                    localMtime: takeCloud ? current?.stat.mtime || localItem.mtime : localItem.mtime,
+                                    localSize: takeCloud ? current?.stat.size || localItem.size : localItem.size,
                                     remoteEtag: resultingEtag,
                                     remoteId: resultingId,
                                     localHash: resultingHash,
@@ -3639,11 +3640,9 @@ export class OneDriveSyncService {
                                     await this.assertFresh(operation, path, localItem, undefined);
                                     uploaded = await this.uploadStaged(operation, path, data, false, null);
                                 }
-                                const current = this.app.vault.getAbstractFileByPath(path) as TFile | null;
-                                const currentMtime = current?.stat.mtime || localItem.mtime;
                                 next[path] = {
-                                    localMtime: currentMtime === readMtime ? readMtime : localItem.mtime,
-                                    localSize: current?.stat.size || localItem.size,
+                                    localMtime: readMtime,
+                                    localSize: data.byteLength,
                                     remoteEtag: uploaded?.eTag || uploaded?.etag || "",
                                     remoteId: uploaded?.id || "",
                                     localHash: await this.sha256Bytes(data),
@@ -3743,6 +3742,8 @@ export class OneDriveSyncService {
                     if (pendingUpload) {
                         skippedPaths.add(path);
                         pendingUploadCount++;
+                    } else if (!firstSync && fileError?.recheckFile) {
+                        pendingRechecks++;
                     } else {
                         failedDiagnostics.push(this.parseFileErrorToDiagnostic(path, fileError, localItem ? "UPLOAD" : "DOWNLOAD"));
                     }
@@ -3755,6 +3756,7 @@ export class OneDriveSyncService {
             const durationMs = Date.now() - startTime;
             const failedCount = failedDiagnostics.length;
             const pendingUploads = Object.keys(settings.pendingUploadOperations || {}).length;
+            temporaryFileFailure ||= pendingUploads > 0 || pendingRechecks > 0;
             const summary: SyncSummary = {
                 total: allPaths.size,
                 processed: processingIndex,
@@ -3762,6 +3764,7 @@ export class OneDriveSyncService {
                 failed: failedCount,
                 unchanged: unchangedCount,
                 pendingUploads,
+                pendingRechecks,
                 outcome: "incomplete",
                 conflicts: 0,
                 durationMs,
@@ -3845,11 +3848,12 @@ export class OneDriveSyncService {
             }
             if (temporaryFileFailure && !firstSync) this.scheduleBackgroundRetry();
             else this.clearBackgroundRetry();
-            this.statusCallback?.(pendingUploads ? "SmartMD: 有文件待核对" : "SmartMD: 已同步");
+            const checkingCount = pendingUploads + pendingRechecks;
+            this.statusCallback?.(checkingCount ? localize("SmartMD: 正在核对文件") : "SmartMD: 已同步");
             if (!reportProgress && !silentSuccess) {
                 const otherSkipped = skippedPaths.size - pendingUploadCount;
-                const message = pendingUploads
-                    ? localize("OneDrive 已同步其他文件，{0} 个文件的上传仍待核对。", pendingUploads)
+                const message = checkingCount
+                    ? localize("OneDrive 正在后台核对 {0} 个文件。", checkingCount)
                     : localize("OneDrive 同步完成");
                 new Notice(otherSkipped ? message + " " + localize("另有 {0} 个文件已跳过。", otherSkipped) : message);
             }
@@ -6690,6 +6694,7 @@ export class OneDriveSyncService {
 
     private async setUploadedModificationTime(
         uploaded: any, mtime: number, data: ArrayBuffer, operation?: RunTicket, beforeGraphDispatch?: () => void,
+        acceptAcknowledgedTimestamp = false,
     ): Promise<any> {
         const version = uploaded?.eTag || uploaded?.etag;
         if (!uploaded?.id || !version || !Number.isFinite(mtime) || mtime <= 0) {
@@ -6707,7 +6712,8 @@ export class OneDriveSyncService {
                 { fileSystemInfo: { lastModifiedDateTime: new Date(mtime).toISOString() } },
                 { "If-Match": version }, checkCurrent);
             if (updated?.id === uploaded.id && (updated.eTag || updated.etag) &&
-                updated.fileSystemInfo?.lastModifiedDateTime && this.remoteModificationTime(updated) === mtime) {
+                (acceptAcknowledgedTimestamp ||
+                    (updated.fileSystemInfo?.lastModifiedDateTime && this.remoteModificationTime(updated) === mtime))) {
                 return { ...uploaded, ...updated, eTag: updated.eTag || updated.etag };
             }
         } catch (error: any) {
@@ -6795,6 +6801,7 @@ export class OneDriveSyncService {
             }
         }
         this.authority.beginFinal(operation);
+        let verificationStep: "timestamp" | "readback" | undefined;
         try {
             if (!appRelative) await this.setUploadPhase(path, "FINAL_PUT_ISSUED");
             let finalUploaded = await this.upload(
@@ -6808,9 +6815,24 @@ export class OneDriveSyncService {
                 });
             }
             if (expectedLocal) {
-                finalUploaded = await this.setUploadedModificationTime(
-                    finalUploaded, expectedLocal.mtime, data, operation, beforeGraphDispatch,
-                );
+                verificationStep = "timestamp";
+                try {
+                    const contentEtag = finalUploaded?.eTag || finalUploaded?.etag;
+                    finalUploaded = await this.setUploadedModificationTime(
+                        finalUploaded, expectedLocal.mtime, data, operation, beforeGraphDispatch, !appRelative,
+                    );
+                    const timestampEtag = finalUploaded?.eTag || finalUploaded?.etag;
+                    if (!appRelative && timestampEtag !== contentEtag) {
+                        await this.setUploadPhase(path, "FINAL_PUT_ISSUED", {
+                            contentAcknowledgedId: finalUploaded.id,
+                            contentAcknowledgedEtag: timestampEtag,
+                        });
+                    }
+                } catch (error: any) {
+                    if (appRelative || !error?.isUnknownCommit) throw error;
+                    // OneDrive may store a different timestamp. Confirm the exact
+                    // acknowledged file and bytes before accepting that metadata.
+                }
             }
             if (!appRelative) {
                 // IMPORTANT: the normal upload path must durably save the
@@ -6823,19 +6845,20 @@ export class OneDriveSyncService {
                     throw new Error("普通上传目标已发写入但没有可信ItemID/ETag，保留原操作等待只读对账");
                 }
                 const localFile = this.app.vault.getAbstractFileByPath(path);
-                if (!(localFile instanceof TFile) ||
-                    !sameBytes(await this.app.vault.readBinary(localFile), data)) {
+                if (!(localFile instanceof TFile)) {
                     throw new Error("正式写入后本机原稿改变，停止暂存清理并保护已上传原文");
                 }
-                const remoteMatches = (await this.remoteFiles(true, true))
-                    .filter((item) => item.path === path);
-                if (remoteMatches.length !== 1 ||
-                    remoteMatches[0].id !== finalId ||
-                    remoteMatches[0].etag !== finalEtag ||
-                    remoteMatches[0].size !== data.byteLength ||
-                    (expectedLocal && remoteMatches[0].mtime !== expectedLocal.mtime) ||
-                    !sameBytes(await this.remoteBytes(remoteMatches[0]), data)) {
+                verificationStep = "readback";
+                const remote = await this.readRemoteFileMetadata(path);
+                if (!remote || remote.id !== finalId || remote.etag !== finalEtag ||
+                    remote.size !== data.byteLength || (expectedLocal && remote.mtime === undefined) ||
+                    !sameBytes(await this.remoteBytes(remote), data)) {
                     throw new Error("普通上传母文件尚未完成真实版本和SHA读回，禁止删除最后的暂存副本");
+                }
+                const verified = await this.readRemoteFileMetadata(path);
+                if (!verified || verified.id !== remote.id || verified.etag !== remote.etag ||
+                    verified.mtime !== remote.mtime) {
+                    throw new Error("核对上传结果时云端版本再次变化");
                 }
                 this.assertCurrent(operation);
                 const settings = this.settings();
@@ -6846,12 +6869,17 @@ export class OneDriveSyncService {
                     record.sourceSha256 !== await this.sha256Bytes(data)) {
                     throw new Error("上传原操作身份或阶段漂移，不能登记母文件基线");
                 }
+                if (this.app.vault.getAbstractFileByPath(path) !== localFile ||
+                    !sameBytes(await this.app.vault.readBinary(localFile), data)) {
+                    throw new Error("核对上传结果时本机文件再次变化");
+                }
+                this.assertCurrent(operation);
                 const priorStates = settings.fileStates || {};
                 const priorRecord = { ...record };
                 settings.fileStates = {
                     ...priorStates, [path]: {
-                        localMtime: localFile.stat.mtime,
-                        localSize: localFile.stat.size,
+                        localMtime: record.sourceMtime,
+                        localSize: record.sourceBytes,
                         localHash: record.sourceSha256,
                         remoteId: finalId, remoteEtag: finalEtag,
                     },
@@ -6909,7 +6937,7 @@ export class OneDriveSyncService {
                 error.isUnknownCommit = true;
             } else if (!appRelative) {
                 try {
-                    await this.setUploadPhase(path, "RECONCILE_REQUIRED");
+                    await this.setUploadPhase(path, "RECONCILE_REQUIRED", { verificationStep });
                 } catch {
                     // Never suppress the original failure or assume a failed
                     // journal update proves that the remote request failed.
@@ -7750,8 +7778,10 @@ export class OneDriveSyncService {
         const hasInvalidChars = /[:*?"<>|\\]/.test(fileName) || /[\s.]$/.test(fileName) || safeMsg.toLowerCase().includes("invalid characters") || safeMsg.toLowerCase().includes("namecontainsinvalidcharacters");
 
         let category: SyncFailureCategory = "UNKNOWN_ERROR";
-        let humanReason = `云端传输遇到异常 (${status || "未知状态码"})`;
-        let humanExplanation = `在${phase === "UPLOAD" ? "上传" : "下载"}文件时，微软网关返回了错误响应。`;
+        let humanReason = status ? `云端传输遇到异常 (HTTP ${status})` : "文件同步尚未完成";
+        let humanExplanation = status
+            ? `OneDrive 返回 HTTP ${status}。`
+            : "这次同步没有记录到 OneDrive 的 HTTP 响应。";
         let remediation: ActionableRemediation = {
             actionType: "RETRY_LATER",
             badgeText: "稍后重试",
