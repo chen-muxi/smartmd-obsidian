@@ -519,6 +519,8 @@ export class OneDriveSyncService {
     private firstUploadInspection: { controller: AbortController; label: string } | null = null;
     private firstConnectionError = "";
     private firstConnectionProgress = "";
+    private syncProgress = "";
+    private shortcutSyncNotice: Notice | null = null;
     private firstConnectionNotice: Notice | null = null;
     private sharedSettingsError = "";
     private readonly firstUploadReadTimeoutMs = 30_000;
@@ -2462,7 +2464,7 @@ export class OneDriveSyncService {
     statusText(): string {
         const settings = this.settings();
         if (settings.status === "stopping") return "正在停止，等待当前提交完成并核对状态";
-        if (this.running || settings.status === "syncing") return "同步中";
+        if (this.running || settings.status === "syncing") return this.syncProgress || "同步中";
         if (this.firstUploadInspection) return this.firstUploadInspection.label;
         if (this.preparing) return this.firstConnectionProgress || (Platform.isAndroidApp
             ? "正在查找 OneDrive 知识库…" : "正在连接 OneDrive 并检查同步范围");
@@ -2473,7 +2475,18 @@ export class OneDriveSyncService {
         if (settings.status === "partial_success") return localizeMessage(settings.lastError) || localize("部分同步完成（存在未同步文件）");
         if (settings.status === "failed") return localize("同步失败：{0}", localizeMessage(settings.lastError) || localize("未知原因"));
         if (settings.status === "paused") return settings.lastError ? localize("同步未完成：{0}", localizeMessage(settings.lastError)) : "已暂停";
-        if (settings.lastSuccessAt) return `上次成功：${new Date(settings.lastSuccessAt).toLocaleString()}`;
+        if (settings.lastSuccessAt) {
+            if (Platform.isAndroidApp) {
+                const summary = settings.lastSyncSummary;
+                const checking = Object.keys(settings.pendingUploadOperations || {}).length + (summary?.pendingRechecks ?? 0);
+                if (checking) return localize("OneDrive 正在后台核对 {0} 个文件。", checking);
+                const skipped = settings.lastSkippedCount || 0;
+                if (skipped) return localize("同步完成，跳过 {0} 个文件。", skipped);
+                if (summary?.outcome === "complete" && summary.success === 0) return localize("已是最新，无需同步。");
+                return localize("OneDrive 同步完成");
+            }
+            return `上次成功：${new Date(settings.lastSuccessAt).toLocaleString()}`;
+        }
         return "尚未完成首次同步";
     }
 
@@ -2570,6 +2583,34 @@ export class OneDriveSyncService {
         this.resumedApprovalGeneration++;
         this.resumedReviewTickets = new WeakMap();
         return remote;
+    }
+
+    async syncFromAndroidShortcut(): Promise<void> {
+        if (this.shortcutSyncNotice) return;
+        const notice = new Notice(this.syncProgress || localize("OneDrive 正在检查文件…"), 0);
+        this.shortcutSyncNotice = notice;
+        let result: string;
+        try {
+            const completed = await this.manualSync();
+            const status = this.settings().status;
+            result = completed || this.retryAt > Date.now() ||
+                status === "failed" || status === "partial_success" || status === "paused"
+                ? localizeMessage(this.statusText())
+                : localize("OneDrive 同步未完成，请在设置中查看。");
+        } catch (error) {
+            result = localize("OneDrive 同步失败：{0}", localizeMessage(safeOneDriveError(error)));
+        } finally {
+            notice.hide();
+        }
+        if (this.shortcutSyncNotice === notice) {
+            this.shortcutSyncNotice = null;
+            new Notice(result, 6500);
+        }
+    }
+
+    private setSyncProgress(text: string): void {
+        this.syncProgress = text;
+        this.shortcutSyncNotice?.setMessage(text);
     }
 
     async manualSync(): Promise<boolean> {
@@ -3168,6 +3209,8 @@ export class OneDriveSyncService {
     }
 
     dispose(): void {
+        this.shortcutSyncNotice?.hide();
+        this.shortcutSyncNotice = null;
         this.resumedApprovalGeneration++;
         this.resumedReviewTickets = new WeakMap();
         this.clearBackgroundRetry();
@@ -3211,6 +3254,7 @@ export class OneDriveSyncService {
         }
         const operation = this.authority.start(this.settings(), this.contextKey());
         this.running = true;
+        this.setSyncProgress(localize("正在读取本地与云端状态…"));
         this.notifyStatusChange();
         const settings = this.settings();
         for (const [path, record] of Object.entries(settings.pendingUploadOperations || {}) as [string, any][]) {
@@ -3407,6 +3451,7 @@ export class OneDriveSyncService {
                 processingIndex++;
                 const progressText = `正在执行同步计划 ${processingIndex}/${allPaths.size}…`;
                 reportProgress?.(progressText);
+                this.setSyncProgress(localize("正在处理第 {0} 项，共 {1} 项", processingIndex, allPaths.size));
                 this.statusCallback?.(`SmartMD: 同步中 (${processingIndex}/${allPaths.size})`);
                 const localItem = localMap.get(path);
                 const remoteItem = remoteMap.get(path);
@@ -3783,7 +3828,7 @@ export class OneDriveSyncService {
                     await (this.store as any).save();
                     if (temporaryFileFailure && !firstSync) this.scheduleBackgroundRetry();
                     this.statusCallback?.(`SmartMD: 部分同步 (${failedCount} 失败)`);
-                    if (!silentSuccess || !this.retryAt) new Notice(localize("OneDrive 同步部分完成：{0} 成功，{1} 失败。可在设置查看详情。", successCount, failedCount), 8000);
+                    if (!this.shortcutSyncNotice && (!silentSuccess || !this.retryAt)) new Notice(localize("OneDrive 同步部分完成：{0} 成功，{1} 失败。可在设置查看详情。", successCount, failedCount), 8000);
                     return false;
                 } else {
                     settings.fileStates = this.mergePendingUploadBaselines(next);
@@ -3793,7 +3838,7 @@ export class OneDriveSyncService {
                     await (this.store as any).save();
                     if (temporaryFileFailure && !firstSync) this.scheduleBackgroundRetry();
                     this.statusCallback?.("SmartMD: 同步失败");
-                    if (!silentSuccess || !this.retryAt) new Notice(localize("OneDrive 同步失败：{0}", localizeMessage(settings.lastError)), 8000);
+                    if (!this.shortcutSyncNotice && (!silentSuccess || !this.retryAt)) new Notice(localize("OneDrive 同步失败：{0}", localizeMessage(settings.lastError)), 8000);
                     return false;
                 }
             }
@@ -3832,7 +3877,9 @@ export class OneDriveSyncService {
                 settings.lastSuccessAt = Date.now();
                 settings.lastError = "";
                 summary.outcome = "complete";
-                reportProgress?.(localize("正在保存同步结果…"));
+                this.setSyncProgress(localize("正在保存同步结果…"));
+                reportProgress?.(this.syncProgress);
+                if (Platform.isAndroidApp) this.statusCallback?.(this.syncProgress);
                 if (firstSync) await this.store.saveWithIdentityGuard(() => this.assertCurrent(operation));
                 else await this.store.save();
             } catch (error) {
@@ -3850,7 +3897,7 @@ export class OneDriveSyncService {
             else this.clearBackgroundRetry();
             const checkingCount = pendingUploads + pendingRechecks;
             this.statusCallback?.(checkingCount ? localize("SmartMD: 正在核对文件") : "SmartMD: 已同步");
-            if (!reportProgress && !silentSuccess) {
+            if (!this.shortcutSyncNotice && !reportProgress && (!silentSuccess || (Platform.isAndroidApp && successCount > 0 && !checkingCount))) {
                 const otherSkipped = skippedPaths.size - pendingUploadCount;
                 const message = checkingCount
                     ? localize("OneDrive 正在后台核对 {0} 个文件。", checkingCount)
@@ -3879,6 +3926,7 @@ export class OneDriveSyncService {
                 this.activeFirstSyncTicket = null;
             }
             this.running = false;
+            this.syncProgress = "";
             this.authority.finishFinal(operation);
             this.notifyStatusChange();
         }
@@ -7688,7 +7736,7 @@ export class OneDriveSyncService {
         settings.lastError = `${safeOneDriveError(error)}${detail}`;
         console.error("[SmartMD OneDrive Sync Failure Detail]:", settings.lastError);
         await (this.store as any).save();
-        if (!silent) new Notice(localize("OneDrive 同步已暂停：{0}", localizeMessage(settings.lastError)), 8000);
+        if (!silent && !this.shortcutSyncNotice) new Notice(localize("OneDrive 同步已暂停：{0}", localizeMessage(settings.lastError)), 8000);
     }
 
     private async maintainOneDriveRecoveries(operation: RunTicket): Promise<void> {

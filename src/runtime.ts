@@ -114,7 +114,8 @@ export class SmartMDRuntime {
             this.openSettingsTab("onedrive");
             return;
         }
-        await this.oneDrive.manualSync();
+        if (Platform.isAndroidApp) await this.oneDrive.syncFromAndroidShortcut();
+        else await this.oneDrive.manualSync();
     }
 
     openSettingsTab(page?: "home" | "publish" | "onedrive" | "external" | "ai" | "about"): void {
@@ -221,7 +222,10 @@ export class SmartMDRuntime {
             () => this.publish.resumeAfterSignIn(),
         );
         this.oneDrive = new OneDriveSyncService(this.app, this.store, this.auth);
-        this.oneDrive.setStatusCallback((text: string) => this.updateStatusBar(text));
+        this.oneDrive.setStatusCallback((text: string) => {
+            this.updateStatusBar(text);
+            if (Platform.isAndroidApp) this.settingsTab?.updateOneDriveStatusText();
+        });
         if (this.supportsExternalFolderSync) {
             const external = new ExternalSyncService(this.app, this.store);
             this.external = external;
@@ -1018,6 +1022,12 @@ export class SmartMDSettingsTab extends PluginSettingTab {
         spaceSetting.addButton((button) => button.setButtonText(localize("管理")).setCta().onClick(() => this.runtime.publish.openManager()));
     }
 
+    updateOneDriveStatusText(): void {
+        if (this.activePage !== "onedrive" || !this.containerEl.isConnected) return;
+        const status = this.containerEl.querySelector(".smartmd-onedrive-status-text");
+        if (status) status.textContent = localizeMessage(this.runtime.oneDrive.statusText());
+    }
+
     private oneDriveSection(container: HTMLElement, filesOpen: boolean, backupsOpen: boolean): void {
         const settings = this.runtime.oneDrive.settings();
         const pendingUploads = Object.keys(settings.pendingUploadOperations || {});
@@ -1066,6 +1076,7 @@ export class SmartMDSettingsTab extends PluginSettingTab {
                         }
                     });
             });
+        if (Platform.isAndroidApp) oneDriveStatus.descEl.addClass("smartmd-onedrive-status-text");
         if (this.runtime.oneDrive.canCancelFirstUploadInspection()) {
             oneDriveStatus.addButton(button => button
                 .setButtonText(localize("取消检查"))
